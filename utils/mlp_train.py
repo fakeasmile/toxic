@@ -3,7 +3,7 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 from models.mlp import MLP
 import matplotlib
 import matplotlib.pyplot as plt
@@ -47,9 +47,9 @@ def load_data(base_config, file_name):
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
-def plot_metrics(base_config, epochs, losses, f1_scores):
-    """绘制损失与F1分数曲线图"""
-    plt.figure(figsize=(10, 6))
+def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
+    """绘制损失与各项评价指标曲线图"""
+    plt.figure(figsize=(12, 7))
     ax1 = plt.gca()
     ax2 = ax1.twinx()
 
@@ -59,21 +59,22 @@ def plot_metrics(base_config, epochs, losses, f1_scores):
     ax1.set_ylabel('Loss', color='tab:red')
     ax1.tick_params(axis='y', labelcolor='tab:red')
 
-    # 绘制验证集F1分数 (右轴)
+    # [修改] 绘制验证集 F1, Precision, Recall (右轴)
     lns2 = ax2.plot(epochs, f1_scores, color='tab:blue', marker='s', label='Test F1')
-    ax2.set_ylabel('F1 Score', color='tab:blue')
-    ax2.tick_params(axis='y', labelcolor='tab:blue')
+    lns3 = ax2.plot(epochs, precisions, color='tab:green', marker='^', linestyle='--', label='Test Precision')
+    lns4 = ax2.plot(epochs, recalls, color='tab:orange', marker='v', linestyle=':', label='Test Recall')
 
-    plt.title('MLP Training Metrics (Test Set)')
+    ax2.set_ylabel('Score', color='black')
+    ax2.tick_params(axis='y', labelcolor='black')
+
+    plt.title('MLP Training Metrics with Gating Mechanism')
 
     # 合并图例
-    lns = lns1 + lns2
+    lns = lns1 + lns2 + lns3 + lns4
     labs = [l.get_label() for l in lns]
-    ax1.legend(lns, labs, loc='upper right')
+    ax1.legend(lns, labs, loc='lower right')
 
     plt.grid(True, linestyle='--', alpha=0.6)
-
-    # 保存到实验目录
     save_path = base_config.experiment_path / "training_metrics.png"
     plt.savefig(save_path)
     print(f">>> 训练图表已保存至: {save_path}")
@@ -94,10 +95,12 @@ def train(base_config, train_data, test_data):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
     best_f1 = 0.0
-    # 用于绘图的数据记录
     epoch_list = []
     loss_history = []
     f1_history = []
+    # [新增] 记录精确率和召回率的历史
+    precision_history = []
+    recall_history = []
 
     for epoch in range(50):
         model.train()
@@ -116,7 +119,6 @@ def train(base_config, train_data, test_data):
             for val_x, val_y in test_loader:
                 val_x, val_y = val_x.to(device), val_y.to(device)
                 val_outputs = model(val_x)
-
                 v_loss = criterion(val_outputs, val_y)
                 total_val_loss += v_loss.item()
 
@@ -125,23 +127,28 @@ def train(base_config, train_data, test_data):
                 all_labels.extend(val_y.cpu().numpy())
 
         avg_val_loss = total_val_loss / len(test_loader)
-        current_f1 = f1_score(all_labels, all_preds, average='macro')
 
-        # 记录数据用于绘图
+        # [修改] 计算三个指标
+        current_f1 = f1_score(all_labels, all_preds, average='macro')
+        current_precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        current_recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+
         epoch_list.append(epoch + 1)
         loss_history.append(avg_val_loss)
         f1_history.append(current_f1)
+        precision_history.append(current_precision)
+        recall_history.append(current_recall)
 
-        print(f"Epoch {epoch + 1}: Test Loss = {avg_val_loss:.4f}, Test F1 = {current_f1:.4f}")
+        print(
+            f"Epoch {epoch + 1}: Loss = {avg_val_loss:.4f}, F1 = {current_f1:.4f}, P = {current_precision:.4f}, R = {current_recall:.4f}")
 
         if current_f1 > best_f1:
             best_f1 = current_f1
-            # 路径已修改为 experiment_path
             torch.save(model.state_dict(), base_config.experiment_path / "best_mlp_model.pth")
-            print(f">>> 发现更优模型，已保存至 {base_config.experiment_path}")
+            print(f">>> 发现更优模型 (F1: {best_f1:.4f})，已保存")
 
-    # 训练结束后调用绘图函数
-    plot_metrics(base_config, epoch_list, loss_history, f1_history)
+    # [修改] 调用更新后的绘图函数
+    plot_metrics(base_config, epoch_list, loss_history, f1_history, precision_history, recall_history)
 
 
 if __name__ == '__main__':
