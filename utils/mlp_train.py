@@ -5,6 +5,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import f1_score
 from models.mlp import MLP
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
 
 
 def init():
@@ -20,13 +23,10 @@ def init():
 
 def load_data(base_config, file_name):
     """加载指定文件的概念向量和标签"""
-
-    # 加载概念向量
     concept_path = base_config.processed_path / file_name
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
-    # 从源数据集中加载标签
     if file_name.startswith("train"):
         label_path = base_config.train_path
     elif file_name.startswith("test"):
@@ -38,96 +38,114 @@ def load_data(base_config, file_name):
         raw_data = json.load(f)
 
     concepts, labels = [], []
-
     assert len(raw_data) == len(raw_concept_data)
 
     for i in range(0, len(raw_concept_data)):
-        # 特征：形容词概念向量
         concepts.append(raw_concept_data[i]["concept"])
         labels.append(raw_data[i]["toxic"])
 
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
+def plot_metrics(base_config, epochs, losses, f1_scores):
+    """绘制损失与F1分数曲线图"""
+    plt.figure(figsize=(10, 6))
+    ax1 = plt.gca()
+    ax2 = ax1.twinx()
+
+    # 绘制验证集损失 (左轴)
+    lns1 = ax1.plot(epochs, losses, color='tab:red', marker='o', label='Test Loss')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss', color='tab:red')
+    ax1.tick_params(axis='y', labelcolor='tab:red')
+
+    # 绘制验证集F1分数 (右轴)
+    lns2 = ax2.plot(epochs, f1_scores, color='tab:blue', marker='s', label='Test F1')
+    ax2.set_ylabel('F1 Score', color='tab:blue')
+    ax2.tick_params(axis='y', labelcolor='tab:blue')
+
+    plt.title('MLP Training Metrics (Test Set)')
+
+    # 合并图例
+    lns = lns1 + lns2
+    labs = [l.get_label() for l in lns]
+    ax1.legend(lns, labs, loc='upper right')
+
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # 保存到实验目录
+    save_path = base_config.experiment_path / "training_metrics.png"
+    plt.savefig(save_path)
+    print(f">>> 训练图表已保存至: {save_path}")
+    plt.close()
+
+
 def train(base_config, train_data, test_data):
-    # 解构训练集与测试集的特征和标签
     train_x, train_y = train_data
     test_x, test_y = test_data
-    # 构造训练数据加载器，设置Batch大小并打乱
     train_loader = DataLoader(TensorDataset(train_x, train_y), batch_size=32, shuffle=True)
-    # 构造测试数据加载器，用于模型验证
     test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=32, shuffle=False)
-    # 初始化MLP模型，输入维度为形容词数量
-    model = MLP(in_features=train_x.shape[1])
-    # 自动选择计算设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 将模型移动到计算设备
-    model.to(device)
-    # 定义交叉熵损失函数
-    criterion = nn.CrossEntropyLoss()
-    # 定义Adam优化器，设置学习率
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
-    # 初始化历史最高F1分数
-    best_f1 = 0.0
 
-    # 开始训练循环
+    model = MLP(in_features=train_x.shape[1])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+
+    best_f1 = 0.0
+    # 用于绘图的数据记录
+    epoch_list = []
+    loss_history = []
+    f1_history = []
+
     for epoch in range(50):
-        # 开启训练模式
         model.train()
-        # 遍历训练批次
         for batch_x, batch_y in train_loader:
-            # 数据搬运至设备
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            # 梯度清零
             optimizer.zero_grad()
-            # 前向计算得到预测输出
             outputs = model(batch_x)
-            # 计算当前批次损失
             loss = criterion(outputs, batch_y)
-            # 反向传播计算梯度
             loss.backward()
-            # 更新模型参数
             optimizer.step()
 
-        # 开启评估模式
         model.eval()
-        # 初始化预测列表与真实列表
         all_preds, all_labels = [], []
-        # 禁用梯度计算以节省显存
+        total_val_loss = 0.0
         with torch.no_grad():
-            # 遍历测试集进行验证
             for val_x, val_y in test_loader:
-                # 验证数据搬运
                 val_x, val_y = val_x.to(device), val_y.to(device)
-                # 获取模型原始输出
                 val_outputs = model(val_x)
-                # 取最大概率对应的索引作为预测类
+
+                v_loss = criterion(val_outputs, val_y)
+                total_val_loss += v_loss.item()
+
                 preds = torch.argmax(val_outputs, dim=1)
-                # 收集预测结果
                 all_preds.extend(preds.cpu().numpy())
-                # 收集真实标签
                 all_labels.extend(val_y.cpu().numpy())
 
-        # 计算当前Epoch在验证集上的宏观F1分数
+        avg_val_loss = total_val_loss / len(test_loader)
         current_f1 = f1_score(all_labels, all_preds, average='macro')
-        # 打印当前训练进度与性能
-        print(f"Epoch {epoch + 1}: Test F1 = {current_f1:.4f}")
 
-        # 如果当前性能优于历史最好水平
+        # 记录数据用于绘图
+        epoch_list.append(epoch + 1)
+        loss_history.append(avg_val_loss)
+        f1_history.append(current_f1)
+
+        print(f"Epoch {epoch + 1}: Test Loss = {avg_val_loss:.4f}, Test F1 = {current_f1:.4f}")
+
         if current_f1 > best_f1:
-            # 更新最高分记录
             best_f1 = current_f1
-            # 保存性能最佳的模型参数
-            torch.save(model.state_dict(), base_config.processed_path / "best_mlp_model.pth")
-            # 打印保存提示
-            print(f">>> 发现更优模型，已保存至 {base_config.processed_path}")
+            # 路径已修改为 experiment_path
+            torch.save(model.state_dict(), base_config.experiment_path / "best_mlp_model.pth")
+            print(f">>> 发现更优模型，已保存至 {base_config.experiment_path}")
+
+    # 训练结束后调用绘图函数
+    plot_metrics(base_config, epoch_list, loss_history, f1_history)
 
 
 if __name__ == '__main__':
     base_config = init()
-    # 加载训练集
     train_data = load_data(base_config, "train_with_concepts.json")
-    # 加载测试集
     test_data = load_data(base_config, "test_with_concepts.json")
-    # 执行训练与验证过程
     train(base_config, train_data, test_data)
