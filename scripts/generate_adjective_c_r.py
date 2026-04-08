@@ -99,7 +99,7 @@ def generate_adj_concept(base_config):
     adjectives = pd.read_csv(base_config.adjective_path)["chinese"].tolist()
 
     # 读取数据集
-    with open(base_config.train_path, "r", encoding="utf-8") as f:
+    with open(base_config.test_path, "r", encoding="utf-8") as f:
         train_set = json.load(f)
 
     results = []
@@ -213,7 +213,7 @@ def generate_adj_concept(base_config):
         if torch.cuda.is_available() and sample_idx % 128 == 0:
             torch.cuda.empty_cache()
 
-    output_path = base_config.processed_path / "with_concepts2.json"
+    output_path = base_config.processed_path / "test_with_concepts.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
 

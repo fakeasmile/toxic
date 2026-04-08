@@ -34,10 +34,6 @@ data/
 tmp_gen.pyc.1729423275760
 scripts/gacr_beifen.py
 
-# 临时过滤还在编写的文件
-utils/mlp_train.py
-models/mlp.py
-
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
