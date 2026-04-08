@@ -30,9 +30,13 @@ models/bert-base-chinese
 models/Qwen2.5-1.5B-Instruct
 models/Qwen2.5-3B-Instruct
 models/Qwen2.5-7B-Instruct
-data/raw
+data/
 tmp_gen.pyc.1729423275760
 scripts/gacr_beifen.py
+
+# 临时过滤还在编写的文件
+utils/mlp_train.py
+models/mlp.py
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
