@@ -172,16 +172,3 @@ class Pure_Bert(nn.Module):
             token_type_ids=token_type_ids,
         )
         return outputs.pooler_output
-
-if __name__ == '__main__':
-    input_ids = torch.tensor([ 101, 1372, 6206,  679, 3341,  704, 1744, 4638, 1912, 1744,  782, 2218,
-        3221, 1962, 1912, 1744,  782,  138, 3322, 3255,  140,  102,    0,    0,
-           0,    0,    0,    0,    0,    0], dtype=torch.long).unsqueeze(0)
-    attention_mask = torch.tensor([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
-        0, 0, 0, 0, 0, 0], dtype=torch.long).unsqueeze(0)
-    token_type_ids = torch.tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0], dtype=torch.long).unsqueeze(0)
-    toxic_ids = torch.tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0], dtype=torch.long).unsqueeze(0)
-    bert = ModifiedBert("./bert-base-chinese", 6, 6)
-    out = bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids, toxic_ids=toxic_ids)

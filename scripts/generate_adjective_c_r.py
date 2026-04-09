@@ -226,4 +226,5 @@ def generate_adj_concept(base_config, dataset_name):
 
 if __name__ == '__main__':
     config = BaseConfig()
-    generate_adj_concept(config, "test")
+    # generate_adj_concept(config, "test")
+    generate_adj_concept(config, "train")

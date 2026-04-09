@@ -5,25 +5,35 @@ from torch import nn
 class MLP(nn.Module):
     def __init__(self, in_features):
         super(MLP, self).__init__()
-        # 门控机制：学习每个特征的重要性权重 (0-1)
-        self.gate_layer = nn.Linear(in_features, in_features)
+        # ========== 门控单元，学习每个特征的重要性权重 (0-1) ==========
+        self.gate_layer = nn.Linear(in_features, in_features)  # 形状：[A, A]
 
-        self.fc1 = nn.Linear(in_features=in_features, out_features=16)
-        self.fc2 = nn.Linear(16, 2)
-        self.dropout = nn.Dropout(0.3)
+        # ========== 归一化 ==========
+        self.norm = nn.LayerNorm(in_features)
+
+        # ========== dropout ==========
+        self.dropout = nn.Dropout(0.2)
+
+        # ========== 分类层 ==========
+        hidden_features = 16
+        self.fc1 = nn.Linear(in_features=in_features, out_features=hidden_features)
+        self.fc2 = nn.Linear(hidden_features, 2)
         self.relu = nn.ReLU()
-        self.tanh = nn.Tanh()
 
     def forward(self, feature_vector):
-        x = feature_vector
+        inputs = feature_vector
 
-        # 使用 Sigmoid 激活函数将权重限制在 0 到 1 之间
-        gate_weights = torch.sigmoid(self.gate_layer(x))
-        # 逐元素相乘，强化重要特征，抑制无关特征
-        x = x * gate_weights
+        # 门控
+        gate_weights = torch.sigmoid(self.gate_layer(feature_vector))
+        x = inputs * gate_weights
 
+        # 归一化+dropout
+        # x = self.norm(x)
         x = self.dropout(x)
+
+        # 分类
         x = self.fc1(x)
-        x = self.tanh(x)
+        x = self.relu(x)
+        x = self.dropout(x)
         x = self.fc2(x)
         return x
