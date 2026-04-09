@@ -177,9 +177,9 @@ def train(base_config, train_data, test_data):
               f"\n>>>R = {current_recall:.4f}")
 
         if current_f1 > best_f1:
+            print(f">>> 发现更优模型 (F1: {current_f1:.4f})，提升：{current_f1 - best_f1:.4f}")
             best_f1 = current_f1
             best_mlp_status_dict = model.state_dict()
-            print(f">>> 发现更优模型 (F1: {best_f1:.4f})，提升：{current_f1 - best_f1:.4f}")
 
     # 保存模型
     if best_mlp_status_dict is not None:
