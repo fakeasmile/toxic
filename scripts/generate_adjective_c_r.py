@@ -219,12 +219,12 @@ def generate_adj_concept(base_config, dataset_name):
         if torch.cuda.is_available() and sample_idx % 128 == 0:
             torch.cuda.empty_cache()
 
-    output_path = base_config.processed_path / f"{dataset_name}_with_concepts.json"
+    output_path = base_config.processed_path / f"{dataset_name}_with_concepts(COLD).json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
 
 
 if __name__ == '__main__':
     config = BaseConfig()
-    # generate_adj_concept(config, "test")
-    generate_adj_concept(config, "train")
+    generate_adj_concept(config, "test")
+    # generate_adj_concept(config, "train")

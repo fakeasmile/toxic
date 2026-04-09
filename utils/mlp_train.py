@@ -79,7 +79,7 @@ def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
     ax1.legend(lns, labs, loc='lower right')
 
     plt.grid(True, linestyle='--', alpha=0.6)
-    save_path = base_config.experiment_path / "training_metrics.png"
+    save_path = base_config.experiment_path / "training_metrics(96).png"
     plt.savefig(save_path)
     print(f">>> 训练图表已保存至: {save_path}")
     plt.close()
@@ -88,7 +88,7 @@ def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
 def train(base_config, train_data, test_data):
 
     batch_size = 16
-    epochs = 200
+    epochs = 100
 
     # 加载数据
     train_x, train_y = train_data
@@ -183,7 +183,7 @@ def train(base_config, train_data, test_data):
 
     # 保存模型
     if best_mlp_status_dict is not None:
-        torch.save(best_mlp_status_dict, base_config.experiment_path / "best_mlp_model.pth")
+        torch.save(best_mlp_status_dict, base_config.experiment_path / "best_mlp_model(96).pth")
     # 调用绘图函数
     plot_metrics(base_config, epoch_list, loss_history, f1_history, precision_history, recall_history)
 

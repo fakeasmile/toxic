@@ -15,7 +15,7 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(0.2)
 
         # ========== 分类层 ==========
-        hidden_features = 16
+        hidden_features = 96
         self.fc1 = nn.Linear(in_features=in_features, out_features=hidden_features)
         self.fc2 = nn.Linear(hidden_features, 2)
         self.relu = nn.ReLU()
