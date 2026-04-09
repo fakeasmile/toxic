@@ -84,15 +84,15 @@ def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
 def train(base_config, train_data, test_data):
     train_x, train_y = train_data
     test_x, test_y = test_data
-    train_loader = DataLoader(TensorDataset(train_x, train_y), batch_size=32, shuffle=True)
-    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=32, shuffle=False)
+    train_loader = DataLoader(TensorDataset(train_x, train_y), batch_size=16, shuffle=True)
+    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=16, shuffle=False)
 
     model = MLP(in_features=train_x.shape[1])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
 
     best_f1 = 0.0
     epoch_list = []
@@ -102,7 +102,7 @@ def train(base_config, train_data, test_data):
     precision_history = []
     recall_history = []
 
-    for epoch in range(50):
+    for epoch in range(200):
         model.train()
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)

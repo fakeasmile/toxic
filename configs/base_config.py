@@ -11,7 +11,7 @@ class BaseConfig():
         self.dirty_lexicon_path = self.base_path / "data" / "raw" / "lexicon"  # 脏词词典路径
         self.experiment_path = self.base_path / "experiments"  # 实验结果保存目录
         self.processed_path = self.base_path / "data" / "processed"  # 数据处理保存路径
-        self.adjective_path = self.base_path / "data" / "raw" / "adjective" / "adjectives.csv"  # 形容词词典路径
+        self.adjective_path = self.base_path / "data" / "raw" / "adjective" / "toxic_adjectives.csv"  # 形容词词典路径
         self.models_path = self.base_path / "models"  # LLM模型路径
 
         self.seed = 1  # 随机种子

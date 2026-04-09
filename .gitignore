@@ -33,6 +33,7 @@ models/Qwen2.5-7B-Instruct
 data/
 tmp_gen.pyc.1729423275760
 scripts/gacr_beifen.py
+utils/a.py
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

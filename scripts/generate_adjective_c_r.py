@@ -83,14 +83,14 @@ def _expand_prefix_cache(base_cache, batch_size: int):
     return tuple(expanded_layers)
 
 
-def generate_adj_concept(base_config):
+def generate_adj_concept(base_config, dataset_name):
     # 加载模型的分词器
     tokenizer, model = load_qwen_model(base_config.models_path)
     device = next(model.parameters()).device
 
     # 定义肯定词/否定词列表
     affirmative_tokens = ["是", "是的", "对", "准确", "正确", "Yes", "yes"]
-    negative_tokens = ["否", "不", "错误", "偏差"]
+    negative_tokens = ["否", "不", "错误", "偏差", "No", "no"]
     # 获取肯定词/否定词token id
     affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
     negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
@@ -99,8 +99,14 @@ def generate_adj_concept(base_config):
     adjectives = pd.read_csv(base_config.adjective_path)["chinese"].tolist()
 
     # 读取数据集
-    with open(base_config.test_path, "r", encoding="utf-8") as f:
-        train_set = json.load(f)
+    if dataset_name == "train":
+        with open(base_config.train_path, "r", encoding="utf-8") as f:
+            data_set = json.load(f)
+    elif dataset_name == "test":
+        with open(base_config.test_path, "r", encoding="utf-8") as f:
+            data_set = json.load(f)
+    else:
+        raise ValueError("dataset_name must be 'train' or 'test'")
 
     results = []
     batch_size = 16  # 形容词批量推理大小
@@ -108,7 +114,7 @@ def generate_adj_concept(base_config):
     # “公共前缀缓存 + 变动后缀批量推理”
     instruction = "你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答‘是’或‘否’。"
 
-    for sample_idx, sample in enumerate(tqdm(train_set, desc="Processing samples"), start=1):
+    for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
         content = sample["content"]  # 文本内容
         concept_vector = []  # 存储这条文本对应的形容词概念向量，形状：[V]
 
@@ -213,11 +219,11 @@ def generate_adj_concept(base_config):
         if torch.cuda.is_available() and sample_idx % 128 == 0:
             torch.cuda.empty_cache()
 
-    output_path = base_config.processed_path / "test_with_concepts.json"
+    output_path = base_config.processed_path / f"{dataset_name}_with_concepts.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
 
 
 if __name__ == '__main__':
     config = BaseConfig()
-    generate_adj_concept(config)
+    generate_adj_concept(config, "test")
