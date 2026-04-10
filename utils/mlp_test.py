@@ -7,7 +7,12 @@ from configs.MLP_config import MLPConfig
 from utils.mlp_train import load_data
 
 
-def evaluate_best_model():
+def evaluate_best_model(model_timestamp: str):
+    """
+
+    :param model_timestamp: 模型参数的时间戳
+    :return:
+    """
     # 1. 初始化配置
     mlp_config = MLPConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,10 +25,10 @@ def evaluate_best_model():
 
     # 3. 初始化模型并加载权重
     model = MLP(in_features=test_x.shape[1])
-    model_path = mlp_config.experiment_path / "best_mlp_model(96).pth"
+    model_path = mlp_config.experiment_path / model_timestamp /"best_model.pth"
 
     try:
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
         model.to(device)
         model.eval()
         print(f">>> 成功加载模型权重: {model_path}")
@@ -60,4 +65,4 @@ def evaluate_best_model():
 
 
 if __name__ == '__main__':
-    evaluate_best_model()
+    evaluate_best_model("20260410-164833")
