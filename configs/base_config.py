@@ -4,8 +4,9 @@ class BaseConfig():
     def __init__(self):
         self.base_path = Path(__file__).parent.parent  # 基目录
 
-        self.train_path = self.base_path / "data" / "raw" / "rawtrain.json"  # 训练数据集路径
-        self.test_path = self.base_path / "data" / "raw" / "_test.json"  # 测试集路径
+        self.dataset_name = "TOXICN"  # 数据集名称（TOXICN/COLD）
+        self.train_path = self.base_path / "data" / "raw" / self.dataset_name / "train.json"  # 训练数据集路径
+        self.test_path = self.base_path / "data" / "raw" / self.dataset_name / "test.json"  # 测试集路径
         self.bert_path = self.base_path / "models" / "bert-base-chinese"  # Bert模型路径
         self.attack_stance_dict_path = self.base_path / "data" / "raw" / "attack_stance.json"  # 攻击立场词典路径
         self.dirty_lexicon_path = self.base_path / "data" / "raw" / "lexicon"  # 脏词词典路径

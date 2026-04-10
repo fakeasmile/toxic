@@ -15,12 +15,12 @@ def evaluate_best_model():
 
     # 2. 加载测试数据
     print(">>> 正在加载测试数据...")
-    test_x, test_y = load_data(mlp_config, "test_with_concepts.json")
+    test_x, test_y = load_data(mlp_config, "test_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json")
     test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=32, shuffle=False)
 
     # 3. 初始化模型并加载权重
     model = MLP(in_features=test_x.shape[1])
-    model_path = mlp_config.experiment_path / "best_mlp_model.pth"
+    model_path = mlp_config.experiment_path / "best_mlp_model(96).pth"
 
     try:
         model.load_state_dict(torch.load(model_path, map_location=device))

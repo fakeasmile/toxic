@@ -5,13 +5,15 @@ class MLPConfig():
     def __init__(self):
         # ========== 路径相关配置（公共配置）==========
         self.base_path = Path(__file__).parent.parent  # 基目录
-        
-        self.train_path = self.base_path / "data" / "raw" / "rawtrain.json"  # 训练数据集路径
-        self.test_path = self.base_path / "data" / "raw" / "_test.json"  # 测试集路径
+
+        self.dataset_name = "COLD"  # 数据集名称（TOXICN/COLD）
+        self.train_path = self.base_path / "data" / "raw" / self.dataset_name / "train.json"  # 训练数据集路径
+        self.test_path = self.base_path / "data" / "raw" / self.dataset_name / "test.json"  # 测试集路径
         self.experiment_path = self.base_path / "experiments"  # 实验结果保存目录
         self.processed_path = self.base_path / "data" / "processed"  # 数据处理保存路径
         self.adjective_path = self.base_path / "data" / "raw" / "adjective" / "toxic_adjectives.csv"  # 形容词词典路径
         self.models_path = self.base_path / "models"  # LLM模型路径
+        self.model_name = "Qwen2.5-1.5B-Instruct"
 
         # ========== 随机种子配置（公共配置）==========
         self.seed = 1  # 随机种子

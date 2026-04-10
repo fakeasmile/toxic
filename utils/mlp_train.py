@@ -191,6 +191,6 @@ def train(mlp_config, train_data, test_data):
 
 if __name__ == '__main__':
     mlp_config = init()
-    train_data = load_data(mlp_config, "train_with_concepts.json")
-    test_data = load_data(mlp_config, "test_with_concepts.json")
+    train_data = load_data(mlp_config, f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json")
+    test_data = load_data(mlp_config, f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json")
     train(mlp_config, train_data, test_data)
