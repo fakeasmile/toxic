@@ -1,4 +1,4 @@
-from configs.base_config import BaseConfig
+from configs.MLP_config import MLPConfig
 import json
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 
 
 def init():
-    base_config = BaseConfig()  # 基础配置
+    base_config = MLPConfig()  # MLP 配置
     if base_config.use_deterministic:
         from utils.seed import set_reproducibility
         set_reproducibility(base_config)
@@ -87,8 +87,8 @@ def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
 
 def train(base_config, train_data, test_data):
 
-    batch_size = 16
-    epochs = 100
+    batch_size = base_config.batch_size
+    epochs = base_config.epochs
 
     # 加载数据
     train_x, train_y = train_data
@@ -98,14 +98,15 @@ def train(base_config, train_data, test_data):
 
     # 加载模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MLP(in_features=train_x.shape[1]).to(device)
+    model = MLP(in_features=train_x.shape[1], dropout_rate=base_config.dropout_rate, 
+                hidden_features=base_config.hidden_features).to(device)
 
     # 损失函数，优化器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=8e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=base_config.max_lr / base_config.div_factor)
 
-    max_lr = 1e-3  # 峰值学习率
-    pct_start = 0.2  # Warmup 占总步数的比例
+    max_lr = base_config.max_lr  # 峰值学习率
+    pct_start = base_config.pct_start  # Warmup 占总步数的比例
     total_steps = len(train_loader) * epochs  # 总训练步数
 
     scheduler = optim.lr_scheduler.OneCycleLR(
@@ -113,9 +114,9 @@ def train(base_config, train_data, test_data):
         max_lr=max_lr,
         total_steps=total_steps,
         pct_start=pct_start,
-        anneal_strategy='cos',  # Warmup后余弦衰减
-        div_factor=25.0,  # 初始学习率 = max_lr / 25
-        final_div_factor=10000.0,  # 最终学习率 = max_lr / 10000
+        anneal_strategy=base_config.anneal_strategy,  # Warmup 后余弦衰减
+        div_factor=base_config.div_factor,  # 初始学习率 = max_lr / div_factor
+        final_div_factor=base_config.final_div_factor,  # 最终学习率 = max_lr / final_div_factor
         three_phase=False
     )
 
