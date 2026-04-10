@@ -8,17 +8,79 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 from models.mlp import MLP
 import matplotlib
 import matplotlib.pyplot as plt
+from datetime import datetime
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
 
 
 def init():
     mlp_config = MLPConfig()  # MLP 配置
+    
+    # 生成时间戳并创建实验目录
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    experiment_dir = mlp_config.experiment_path / timestamp
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    
     if mlp_config.use_deterministic:
         from utils.seed import set_reproducibility
         set_reproducibility(mlp_config)
         print(">>> 已启用确定性模式 (Reproducibility Enabled)")
     else:
         print(">>> 已禁用确定性模式 (Randomness Enabled)，结果将不可复现")
+    
+    # 打印关键配置参数到控制台
+    print("\n" + "="*60)
+    print("MLP 训练配置参数")
+    print("="*60)
+    print(f"实验目录: {mlp_config.experiment_path}")
+    print(f"时间戳: {timestamp}")
+    print("\n--- 数据集配置 ---")
+    print(f"数据集名称: {mlp_config.dataset_name}")
+    print(f"模型名称: {mlp_config.model_name}")
+    print(f"训练集路径: {mlp_config.train_path}")
+    print(f"测试集路径: {mlp_config.test_path}")
+    print("\n--- 训练超参数 ---")
+    print(f"批次大小 (batch_size): {mlp_config.batch_size}")
+    print(f"训练轮数 (epochs): {mlp_config.epochs}")
+    print(f"峰值学习率 (max_lr): {mlp_config.max_lr}")
+    print(f"Warmup比例 (pct_start): {mlp_config.pct_start}")
+    print(f"初始学习率除数 (div_factor): {mlp_config.div_factor}")
+    print(f"最终学习率除数 (final_div_factor): {mlp_config.final_div_factor}")
+    print(f"衰减策略 (anneal_strategy): {mlp_config.anneal_strategy}")
+    print("\n--- 模型结构参数 ---")
+    print(f"Dropout比率: {mlp_config.dropout_rate}")
+    print(f"隐藏层维度: {mlp_config.hidden_features}")
+    print("\n--- 随机种子配置 ---")
+    print(f"随机种子 (seed): {mlp_config.seed}")
+    print(f"确定性模式: {mlp_config.use_deterministic}")
+    print("="*60 + "\n")
+    
+    # 保存完整配置到JSON文件
+    config_dict = {
+        "timestamp": timestamp,
+        "experiment_path": str(mlp_config.experiment_path),
+        "dataset_name": mlp_config.dataset_name,
+        "model_name": mlp_config.model_name,
+        "train_path": str(mlp_config.train_path),
+        "test_path": str(mlp_config.test_path),
+        "processed_path": str(mlp_config.processed_path),
+        "seed": mlp_config.seed,
+        "use_deterministic": mlp_config.use_deterministic,
+        "batch_size": mlp_config.batch_size,
+        "epochs": mlp_config.epochs,
+        "max_lr": mlp_config.max_lr,
+        "pct_start": mlp_config.pct_start,
+        "div_factor": mlp_config.div_factor,
+        "final_div_factor": mlp_config.final_div_factor,
+        "anneal_strategy": mlp_config.anneal_strategy,
+        "dropout_rate": mlp_config.dropout_rate,
+        "hidden_features": mlp_config.hidden_features
+    }
+    
+    config_file = mlp_config.experiment_path / "config.json"
+    with open(config_file, 'w', encoding='utf-8') as f:
+        json.dump(config_dict, f, indent=2, ensure_ascii=False)
+    print(f">>> 配置文件已保存至: {config_file}\n")
+    
     return mlp_config
 
 
@@ -79,7 +141,7 @@ def plot_metrics(mlp_config, epochs, losses, f1_scores, precisions, recalls):
     ax1.legend(lns, labs, loc='lower right')
 
     plt.grid(True, linestyle='--', alpha=0.6)
-    save_path = mlp_config.experiment_path / "training_metrics(96).png"
+    save_path = mlp_config.experiment_path / "metrics.png"
     plt.savefig(save_path)
     print(f">>> 训练图表已保存至: {save_path}")
     plt.close()
@@ -184,7 +246,9 @@ def train(mlp_config, train_data, test_data):
 
     # 保存模型
     if best_mlp_status_dict is not None:
-        torch.save(best_mlp_status_dict, mlp_config.experiment_path / "best_mlp_model(96).pth")
+        model_save_path = mlp_config.experiment_path / "best_model.pth"
+        torch.save(best_mlp_status_dict, model_save_path)
+        print(f">>> 最佳模型已保存至: {model_save_path}")
     # 调用绘图函数
     plot_metrics(mlp_config, epoch_list, loss_history, f1_history, precision_history, recall_history)
 
