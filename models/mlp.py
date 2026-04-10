@@ -3,7 +3,7 @@ from torch import nn
 
 
 class MLP(nn.Module):
-    def __init__(self, in_features):
+    def __init__(self, in_features, dropout_rate=0.2, hidden_features=96):
         super(MLP, self).__init__()
         # ========== 门控单元，学习每个特征的重要性权重 (0-1) ==========
         self.gate_layer = nn.Linear(in_features, in_features)  # 形状：[A, A]
@@ -12,10 +12,9 @@ class MLP(nn.Module):
         self.norm = nn.LayerNorm(in_features)
 
         # ========== dropout ==========
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(dropout_rate)
 
         # ========== 分类层 ==========
-        hidden_features = 96
         self.fc1 = nn.Linear(in_features=in_features, out_features=hidden_features)
         self.fc2 = nn.Linear(hidden_features, 2)
         self.relu = nn.ReLU()
