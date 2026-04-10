@@ -12,27 +12,27 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 
 
 def init():
-    base_config = MLPConfig()  # MLP 配置
-    if base_config.use_deterministic:
+    mlp_config = MLPConfig()  # MLP 配置
+    if mlp_config.use_deterministic:
         from utils.seed import set_reproducibility
-        set_reproducibility(base_config)
+        set_reproducibility(mlp_config)
         print(">>> 已启用确定性模式 (Reproducibility Enabled)")
     else:
         print(">>> 已禁用确定性模式 (Randomness Enabled)，结果将不可复现")
-    return base_config
+    return mlp_config
 
 
-def load_data(base_config, file_name):
+def load_data(mlp_config, file_name):
     """加载指定文件的概念向量和标签"""
-    concept_path = base_config.processed_path / file_name
+    concept_path = mlp_config.processed_path / file_name
     # 加载概念向量文件
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
     if file_name.startswith("train"):
-        label_path = base_config.train_path
+        label_path = mlp_config.train_path
     elif file_name.startswith("test"):
-        label_path = base_config.test_path
+        label_path = mlp_config.test_path
     else:
         raise RuntimeError("in load_data, file_name must be start with 'train' or 'test'")
 
@@ -51,7 +51,7 @@ def load_data(base_config, file_name):
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
-def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
+def plot_metrics(mlp_config, epochs, losses, f1_scores, precisions, recalls):
     """绘制损失与各项评价指标曲线图"""
     plt.figure(figsize=(12, 7))
     ax1 = plt.gca()
@@ -79,16 +79,16 @@ def plot_metrics(base_config, epochs, losses, f1_scores, precisions, recalls):
     ax1.legend(lns, labs, loc='lower right')
 
     plt.grid(True, linestyle='--', alpha=0.6)
-    save_path = base_config.experiment_path / "training_metrics(96).png"
+    save_path = mlp_config.experiment_path / "training_metrics(96).png"
     plt.savefig(save_path)
     print(f">>> 训练图表已保存至: {save_path}")
     plt.close()
 
 
-def train(base_config, train_data, test_data):
+def train(mlp_config, train_data, test_data):
 
-    batch_size = base_config.batch_size
-    epochs = base_config.epochs
+    batch_size = mlp_config.batch_size
+    epochs = mlp_config.epochs
 
     # 加载数据
     train_x, train_y = train_data
@@ -98,15 +98,15 @@ def train(base_config, train_data, test_data):
 
     # 加载模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MLP(in_features=train_x.shape[1], dropout_rate=base_config.dropout_rate, 
-                hidden_features=base_config.hidden_features).to(device)
+    model = MLP(in_features=train_x.shape[1], dropout_rate=mlp_config.dropout_rate, 
+                hidden_features=mlp_config.hidden_features).to(device)
 
     # 损失函数，优化器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=base_config.max_lr / base_config.div_factor)
+    optimizer = optim.AdamW(model.parameters(), lr=mlp_config.max_lr / mlp_config.div_factor)
 
-    max_lr = base_config.max_lr  # 峰值学习率
-    pct_start = base_config.pct_start  # Warmup 占总步数的比例
+    max_lr = mlp_config.max_lr  # 峰值学习率
+    pct_start = mlp_config.pct_start  # Warmup 占总步数的比例
     total_steps = len(train_loader) * epochs  # 总训练步数
 
     scheduler = optim.lr_scheduler.OneCycleLR(
@@ -114,9 +114,9 @@ def train(base_config, train_data, test_data):
         max_lr=max_lr,
         total_steps=total_steps,
         pct_start=pct_start,
-        anneal_strategy=base_config.anneal_strategy,  # Warmup 后余弦衰减
-        div_factor=base_config.div_factor,  # 初始学习率 = max_lr / div_factor
-        final_div_factor=base_config.final_div_factor,  # 最终学习率 = max_lr / final_div_factor
+        anneal_strategy=mlp_config.anneal_strategy,  # Warmup 后余弦衰减
+        div_factor=mlp_config.div_factor,  # 初始学习率 = max_lr / div_factor
+        final_div_factor=mlp_config.final_div_factor,  # 最终学习率 = max_lr / final_div_factor
         three_phase=False
     )
 
@@ -184,13 +184,13 @@ def train(base_config, train_data, test_data):
 
     # 保存模型
     if best_mlp_status_dict is not None:
-        torch.save(best_mlp_status_dict, base_config.experiment_path / "best_mlp_model(96).pth")
+        torch.save(best_mlp_status_dict, mlp_config.experiment_path / "best_mlp_model(96).pth")
     # 调用绘图函数
-    plot_metrics(base_config, epoch_list, loss_history, f1_history, precision_history, recall_history)
+    plot_metrics(mlp_config, epoch_list, loss_history, f1_history, precision_history, recall_history)
 
 
 if __name__ == '__main__':
-    base_config = init()
-    train_data = load_data(base_config, "train_with_concepts.json")
-    test_data = load_data(base_config, "test_with_concepts.json")
-    train(base_config, train_data, test_data)
+    mlp_config = init()
+    train_data = load_data(mlp_config, "train_with_concepts.json")
+    test_data = load_data(mlp_config, "test_with_concepts.json")
+    train(mlp_config, train_data, test_data)
