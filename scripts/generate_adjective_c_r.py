@@ -9,7 +9,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 
-from configs.base_config import BaseConfig
+from configs.MLP_config import MLPConfig
 
 
 def load_qwen_model(model_path: Path):
@@ -83,9 +83,9 @@ def _expand_prefix_cache(base_cache, batch_size: int):
     return tuple(expanded_layers)
 
 
-def generate_adj_concept(base_config, dataset_name):
+def generate_adj_concept(mlp_config, dataset_name):
     # 加载模型的分词器
-    tokenizer, model = load_qwen_model(base_config.models_path)
+    tokenizer, model = load_qwen_model(mlp_config.models_path)
     device = next(model.parameters()).device
 
     # 定义肯定词/否定词列表
@@ -96,14 +96,14 @@ def generate_adj_concept(base_config, dataset_name):
     negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
 
     # 读取形容词列表，提取中文列
-    adjectives = pd.read_csv(base_config.adjective_path)["chinese"].tolist()
+    adjectives = pd.read_csv(mlp_config.adjective_path)["chinese"].tolist()
 
     # 读取数据集
     if dataset_name == "train":
-        with open(base_config.train_path, "r", encoding="utf-8") as f:
+        with open(mlp_config.train_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
     elif dataset_name == "test":
-        with open(base_config.test_path, "r", encoding="utf-8") as f:
+        with open(mlp_config.test_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
     else:
         raise ValueError("dataset_name must be 'train' or 'test'")
@@ -219,12 +219,12 @@ def generate_adj_concept(base_config, dataset_name):
         if torch.cuda.is_available() and sample_idx % 128 == 0:
             torch.cuda.empty_cache()
 
-    output_path = base_config.processed_path / f"{dataset_name}_with_concepts(COLD).json"
+    output_path = mlp_config.processed_path / f"{dataset_name}_with_concepts(COLD).json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
 
 
 if __name__ == '__main__':
-    config = BaseConfig()
-    generate_adj_concept(config, "test")
-    # generate_adj_concept(config, "train")
+    mlp_config = MLPConfig()
+    generate_adj_concept(mlp_config, "test")
+    # generate_adj_concept(mlp_config, "train")

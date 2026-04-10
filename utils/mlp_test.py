@@ -3,24 +3,24 @@ import json
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
 from models.mlp import MLP
-from configs.base_config import BaseConfig
+from configs.MLP_config import MLPConfig
 from utils.mlp_train import load_data
 
 
 def evaluate_best_model():
     # 1. 初始化配置
-    base_config = BaseConfig()
+    mlp_config = MLPConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> 正在使用设备: {device}")
 
     # 2. 加载测试数据
     print(">>> 正在加载测试数据...")
-    test_x, test_y = load_data(base_config, "test_with_concepts.json")
+    test_x, test_y = load_data(mlp_config, "test_with_concepts.json")
     test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=32, shuffle=False)
 
     # 3. 初始化模型并加载权重
     model = MLP(in_features=test_x.shape[1])
-    model_path = base_config.experiment_path / "best_mlp_model.pth"
+    model_path = mlp_config.experiment_path / "best_mlp_model.pth"
 
     try:
         model.load_state_dict(torch.load(model_path, map_location=device))

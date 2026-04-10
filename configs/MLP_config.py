@@ -10,6 +10,8 @@ class MLPConfig():
         self.test_path = self.base_path / "data" / "raw" / "_test.json"  # 测试集路径
         self.experiment_path = self.base_path / "experiments"  # 实验结果保存目录
         self.processed_path = self.base_path / "data" / "processed"  # 数据处理保存路径
+        self.adjective_path = self.base_path / "data" / "raw" / "adjective" / "toxic_adjectives.csv"  # 形容词词典路径
+        self.models_path = self.base_path / "models"  # LLM模型路径
 
         # ========== 随机种子配置（公共配置）==========
         self.seed = 1  # 随机种子
