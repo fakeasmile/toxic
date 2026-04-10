@@ -21,7 +21,7 @@ class MLPConfig():
 
         # ========== MLP 训练超参数 ==========
         self.batch_size = 16  # 批次大小
-        self.epochs = 100  # 训练轮数
+        self.epochs = 200  # 训练轮数
         
         # OneCycleLR 学习率调度器参数
         self.max_lr = 1e-3  # 峰值学习率
@@ -31,7 +31,7 @@ class MLPConfig():
         self.anneal_strategy = 'cos'  # Warmup 后余弦衰减
 
         # ========== MLP 模型参数 ==========
-        self.dropout_rate = 0.2  # Dropout 比率
+        self.dropout_rate = 0.3  # Dropout 比率
         self.hidden_features = 96  # 隐藏层特征维度
 
 
