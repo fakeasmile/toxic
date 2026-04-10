@@ -19,6 +19,7 @@ def init():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     experiment_dir = mlp_config.experiment_path / timestamp
     experiment_dir.mkdir(parents=True, exist_ok=True)
+    mlp_config.experiment_path = experiment_dir
     
     if mlp_config.use_deterministic:
         from utils.seed import set_reproducibility
