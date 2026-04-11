@@ -31,7 +31,7 @@ class BaseConfig():
         self.train_pct_start = 0.15  # 在超参数搜索中，学习率上升期（不触发早停）的比例
         self.train_patience = 2  # 在超参数搜索中，早停耐心值
 
-        self.use_deterministic = False  # 启用确定性算法以确保可复现
+        self.use_deterministic = True  # 启用确定性算法以确保可复现
 
         # 可视化配置
         self.fig_size = (12, 7)  # 图表大小
