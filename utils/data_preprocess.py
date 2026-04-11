@@ -29,6 +29,7 @@ def load_attack_stance_dict(attack_stance_dict_path):
         attack_stance_dict = json.load(f)
     return attack_stance_dict
 
+
 def load_dirty_dict(dirty_dict_path):
     """
     返回的脏词词典结构：
@@ -74,19 +75,21 @@ class ToxicDataset(Dataset):
     def __len__(self):
         return len(self.raw_data)
 
-    def detect_stance(self, input_ids):
+    def detect_stance(self, input_ids, offset_mapping):
         """
         当文本中存在包含攻击立场的「主词 + 至少一个关联词」时，判定存在攻击立场，把主词和关联词位置设置为1，表示具有攻击立场
         eg:如果文本中出现了主词：北京，关联词：打工，教育，这些词在input_ids中的位置对应的stance_ids位置应该设置为1
                 input_ids=['[CLS]', '我', '认', '为', '北', '京', '高', '考', '的', '打', '工', '的', '北', '京', '的', '教', '育', '[SEP]']
                 stance_ids=[  0,      0,   0,    0,    1,   1,    0,   0,    0,    1,   1,    0,   1,    1,   0,    1,    1,    0, ]
         :param input_ids: 原始文本经过BERT分词器分词后的索引序列
+        :param offset_mapping: 每个token在原始文本中的字符位置映射 [(start, end), ...]
         :return:
         """
-        stance_ids = [0]*input_ids.size(1)  # 初始每个词都没有攻击立场
+        stance_ids = [0] * input_ids.size(1)  # 初始每个词都没有攻击立场
 
         text = "".join(self.tokenizer.decode(input_ids.squeeze(), skip_special_tokens=True).split(" "))  # 原始文本（可能被截断处理）
         tokens_seq = self.tokenizer.convert_ids_to_tokens(input_ids.squeeze())  # token序列
+        offsets = offset_mapping.squeeze().tolist()  # offset_mapping转为列表
 
         for _, primary_dict in self.attack_stance_dict.items():
             # primary_dict表示{key:[word1, word2, ...]}形式的主词和关联词的对应关系
@@ -123,29 +126,39 @@ class ToxicDataset(Dataset):
                 for match in primary_word_matches:
                     # 能匹配上说明文本中一定含有这个主词
                     pri_word = match.group()  # 匹配上的主词
-                    pri_length = len(pri_word)
-                    for index, w in enumerate(tokens_seq):
-                        if w == pri_word[:1] and "".join(tokens_seq[index:index + pri_length]) == pri_word:
-                            stance_ids[index:index + pri_length] = [1]*pri_length
+                    pri_start_pos = match.start()  # 主词在原始文本中的起始位置
+                    pri_end_pos = match.end()  # 主词在原始文本中的结束位置
+
+                    # 通过offset_mapping找到覆盖该位置的token索引
+                    for token_idx, (tok_start, tok_end) in enumerate(offsets):
+                        # 如果token的起始位置在主词范围内，标记该token
+                        if tok_start >= pri_start_pos and tok_end <= pri_end_pos and tok_start != tok_end:
+                            stance_ids[token_idx] = 1
+
                 # 设置关联词位置有攻击立场
                 for match in secondary_words_matches:
                     sec_word = match.group()
-                    sec_length = len(sec_word)
-                    for index, w in enumerate(tokens_seq):
-                        if w == sec_word[:1] and "".join(tokens_seq[index:index + sec_length]) == sec_word:
-                            stance_ids[index:index + sec_length] = [1] * sec_length
+                    sec_start_pos = match.start()
+                    sec_end_pos = match.end()
+
+                    # 通过offset_mapping找到覆盖该位置的token索引
+                    for token_idx, (tok_start, tok_end) in enumerate(offsets):
+                        # 如果token的起始位置在关联词范围内，标记该token
+                        if tok_start >= sec_start_pos and tok_end <= sec_end_pos and tok_start != tok_end:
+                            stance_ids[token_idx] = 1
         return stance_ids
 
-    def detect_dirty(self, input_ids):
+    def detect_dirty(self, input_ids, offset_mapping):
         """
         标记脏词（可以处理txl，但是无法处理未登入词[UNK]）
-        :param input_ids:
+        :param input_ids: 原始文本经过BERT分词器分词后的索引序列
+        :param offset_mapping: 每个token在原始文本中的字符位置映射 [(start, end), ...]
         :return:
         """
-        toxic_ids = [0]*input_ids.size(1)
+        toxic_ids = [0] * input_ids.size(1)
 
         text = "".join(self.tokenizer.decode(input_ids.squeeze(), skip_special_tokens=True).split(" "))  # 原始文本（截断？）
-        tokens_seq = self.tokenizer.convert_ids_to_tokens(input_ids.squeeze())  # token序列
+        offsets = offset_mapping.squeeze().tolist()  # offset_mapping转为列表
 
         for dirty_index, (dirty_category, all_dirty_word_list) in enumerate(self.dirty_dict.items()):
             # 查找文本中脏词的正则表达式
@@ -155,23 +168,16 @@ class ToxicDataset(Dataset):
 
             for match in dirty_word_matches:
                 dirty_word = match.group()
-                dirty_word_length = len(dirty_word)
+                dirty_start_pos = match.start()
+                dirty_end_pos = match.end()
 
-                for index, w in enumerate(tokens_seq):
-                    if w == dirty_word[:1]:
-                        sub_dirty_word_list = tokens_seq[index: index+dirty_word_length]
-                        sub_str = ""
-                        for s in sub_dirty_word_list:
-                            if s.startswith("##"):
-                                sub_str+=s[2:]
-                            else:
-                                sub_str+=s
-                        if sub_str == dirty_word:
-                            toxic_ids[index: index+dirty_word_length] = [dirty_index+1]*dirty_word_length
-
+                # 通过offset_mapping找到覆盖该位置的token索引
+                for token_idx, (tok_start, tok_end) in enumerate(offsets):
+                    # 如果token的起始位置在脏词范围内，标记该token
+                    if tok_start >= dirty_start_pos and tok_end <= dirty_end_pos and tok_start != tok_end:
+                        toxic_ids[token_idx] = dirty_index + 1
 
         return toxic_ids
-
 
     def __getitem__(self, index):
         """
@@ -192,9 +198,9 @@ class ToxicDataset(Dataset):
         )
 
         # 检测攻击立场
-        stance_ids = self.detect_stance(inputs["input_ids"])
+        stance_ids = self.detect_stance(inputs["input_ids"], inputs["offset_mapping"])
         # 检测脏词序列
-        toxic_ids = self.detect_dirty(inputs["input_ids"])
+        toxic_ids = self.detect_dirty(inputs["input_ids"], inputs["offset_mapping"])
 
         sample_new = {
             # "topic": sample["topic"],
