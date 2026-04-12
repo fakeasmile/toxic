@@ -99,9 +99,3 @@
 * 拼接+投影破坏了BERT原始嵌入的语义结构：将三个768维向量拼接为2304维后，通过随机初始化的Linear(2304→768)投影回去，该投影层需要从头学习如何从拼接向量中恢复BERT的原始语义，这远比在原始嵌入上做微小加法困难
 * 这与ResNet中残差连接的核心思想一致——保留原始信号，仅学习增量调整。拼接+投影等价于丢弃原始信号，强制网络重新学习完整映射
 * 额外嵌入(toxic_emb/stance_emb)的信息量相对于BERT原始嵌入非常有限，拼接后投影层难以区分主次信号，导致原始语义被噪声稀释
-### 实验二：修改融合方式
-* 变量：融合方式修改为
-
-### 实验三：添加类似MLP的门控机制
-gate = torch.sigmoid(self.fusion_gate(embeddings))
-embeddings = embeddings + gate * toxic_emb + (1-gate) * stance_emb
