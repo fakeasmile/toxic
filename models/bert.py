@@ -9,7 +9,7 @@ class CustomEmbeddings(BertEmbeddings):
     """
     在原始BERT三种嵌入基础上，添加额外嵌入向量
     原始嵌入 = Token + Segment + Position
-    最终嵌入 = 原始嵌入 + 额外嵌入向量
+    融合方式 = 拼接[原始嵌入, toxic_emb, stance_emb] + 线性投影回hidden_size
     """
     def __init__(self, config, pretrained_embeddings, num_toxic_types=6):
         """
@@ -35,6 +35,9 @@ class CustomEmbeddings(BertEmbeddings):
         self.stance_embeddings = nn.Embedding(2, config.hidden_size)
         nn.init.normal_(self.stance_embeddings.weight, std=0.02)
 
+        # 拼接后的投影层: 3 * hidden_size → hidden_size
+        self.projection = nn.Linear(config.hidden_size * 3, config.hidden_size)
+
     def forward(self, input_ids=None, token_type_ids=None, position_ids=None, **kwargs):
         # 获取BERT原始嵌入词向量
         embeddings = super().forward(input_ids, token_type_ids, position_ids)
@@ -42,14 +45,21 @@ class CustomEmbeddings(BertEmbeddings):
         toxic_ids = kwargs.get('toxic_ids', None)  # 获取毒性词嵌入
         stance_ids = kwargs.get('stance_ids', None)  # 获取攻击立场词嵌入
 
-        # 融合
+        # 毒性嵌入：缺失时用零向量填充
         if toxic_ids is not None:
-            toxic_emb = self.toxic_embeddings(toxic_ids)  # 毒性序列->毒性向量
-            embeddings += toxic_emb
+            toxic_emb = self.toxic_embeddings(toxic_ids)
+        else:
+            toxic_emb = torch.zeros_like(embeddings)
 
+        # 攻击立场嵌入：缺失时用零向量填充
         if stance_ids is not None:
             stance_emb = self.stance_embeddings(stance_ids)
-            embeddings += stance_emb
+        else:
+            stance_emb = torch.zeros_like(embeddings)
+
+        # 拼接 [embeddings, toxic_emb, stance_emb] + 线性投影回hidden_size
+        concat_emb = torch.cat([embeddings, toxic_emb, stance_emb], dim=-1)
+        embeddings = self.projection(concat_emb)
 
         return embeddings
 
