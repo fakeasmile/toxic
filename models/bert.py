@@ -9,7 +9,8 @@ class CustomEmbeddings(BertEmbeddings):
     """
     在原始BERT三种嵌入基础上，添加额外嵌入向量
     原始嵌入 = Token + Segment + Position
-    最终嵌入 = 原始嵌入 + 额外嵌入向量
+    最终嵌入 = 原始嵌入 + sigmoid(a) * toxic_emb + sigmoid(b) * stance_emb
+    a、b为可学习的动态权重（向量，每维度独立），sigmoid约束到[0,1]
     """
     def __init__(self, config, pretrained_embeddings, num_toxic_types=6):
         """
@@ -35,6 +36,10 @@ class CustomEmbeddings(BertEmbeddings):
         self.stance_embeddings = nn.Embedding(2, config.hidden_size)
         nn.init.normal_(self.stance_embeddings.weight, std=0.02)
 
+        # 动态融合权重（向量，每维度独立），sigmoid约束到[0,1]
+        self.toxic_weight = nn.Parameter(torch.zeros(config.hidden_size))
+        self.stance_weight = nn.Parameter(torch.zeros(config.hidden_size))
+
     def forward(self, input_ids=None, token_type_ids=None, position_ids=None, **kwargs):
         # 获取BERT原始嵌入词向量
         embeddings = super().forward(input_ids, token_type_ids, position_ids)
@@ -42,14 +47,14 @@ class CustomEmbeddings(BertEmbeddings):
         toxic_ids = kwargs.get('toxic_ids', None)  # 获取毒性词嵌入
         stance_ids = kwargs.get('stance_ids', None)  # 获取攻击立场词嵌入
 
-        # 融合
+        # 动态权重融合：sigmoid约束到[0,1]
         if toxic_ids is not None:
-            toxic_emb = self.toxic_embeddings(toxic_ids)  # 毒性序列->毒性向量
-            embeddings += toxic_emb
+            toxic_emb = self.toxic_embeddings(toxic_ids)
+            embeddings = embeddings + torch.sigmoid(self.toxic_weight) * toxic_emb
 
         if stance_ids is not None:
             stance_emb = self.stance_embeddings(stance_ids)
-            embeddings += stance_emb
+            embeddings = embeddings + torch.sigmoid(self.stance_weight) * stance_emb
 
         return embeddings
 
