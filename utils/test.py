@@ -42,6 +42,7 @@ def test(experiment_dir):
     batch_size = config["batch_size"]
     freeze_bert_layers = config["freeze_bert_layers"]
     num_toxic_types = config["num_toxic_types"]
+    proj_type = config.get("proj_type", "linear")  # 兼容旧实验目录
     dropout_rate = config["dropout_rate"]
     
     print(f"   数据集: {config['dataset_name']}")
@@ -59,7 +60,8 @@ def test(experiment_dir):
     bert_model = ModifiedBert(
         bert_path, 
         freeze_bert_layers, 
-        num_toxic_types
+        num_toxic_types,
+        proj_type
     ).to(device)
     bert_model.load_state_dict(checkpoint['bert_state_dict'])
     
@@ -148,7 +150,7 @@ def test(experiment_dir):
 
 if __name__ == '__main__':
     """
-    加载新格式模型，在测试集上测试
+    加载模型，在测试集上测试
     """
     from pathlib import Path
     
@@ -156,6 +158,6 @@ if __name__ == '__main__':
     project_root = Path(__file__).parent.parent
     
     # 指定测试的实验目录（使用绝对路径）
-    experiment_dir = project_root / "experiments" / "20260410-233449"
+    experiment_dir = project_root / "experiments" / "20260411-231034"
     
     test(experiment_dir)

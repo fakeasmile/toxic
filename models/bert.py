@@ -1,7 +1,11 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import BertModel, BertConfig, BertPreTrainedModel
 from transformers.models.bert.modeling_bert import BertEmbeddings
+
+# 支持的投影层类型
+VALID_PROJ_TYPES = ("linear", "linear_norm", "linear_act_norm")
 
 
 # ========== 自定义BERT词嵌入层 ==========
@@ -9,16 +13,25 @@ class CustomEmbeddings(BertEmbeddings):
     """
     在原始BERT三种嵌入基础上，添加额外嵌入向量
     原始嵌入 = Token + Segment + Position
-    融合方式 = 拼接[原始嵌入, toxic_emb, stance_emb] + 线性投影回hidden_size
+    融合方式 = 拼接[原始嵌入, toxic_emb, stance_emb] + 投影回hidden_size
+
+    proj_type 投影层类型:
+        "linear"           : Linear(3H→H)                         选项a
+        "linear_norm"      : Linear(3H→H) → LayerNorm(H)         选项b
+        "linear_act_norm"  : Linear(3H→H) → GELU → LayerNorm(H)  选项c
     """
-    def __init__(self, config, pretrained_embeddings, num_toxic_types=6):
+    def __init__(self, config, pretrained_embeddings, num_toxic_types=6, proj_type="linear"):
         """
 
         :param config: BERT配置对象
         :param pretrained_embeddings: 原始预训练的BERT嵌入层（带权重）
         :param num_toxic_types: lexicon中毒性类别数
+        :param proj_type: 投影层类型 ("linear"/"linear_norm"/"linear_act_norm")
         """
         super().__init__(config)
+
+        assert proj_type in VALID_PROJ_TYPES, f"proj_type must be one of {VALID_PROJ_TYPES}, got '{proj_type}'"
+        self.proj_type = proj_type
 
         # 复用原始BERT的预训练嵌入层权重
         self.word_embeddings = pretrained_embeddings.word_embeddings  # 预训练词嵌入
@@ -37,6 +50,10 @@ class CustomEmbeddings(BertEmbeddings):
 
         # 拼接后的投影层: 3 * hidden_size → hidden_size
         self.projection = nn.Linear(config.hidden_size * 3, config.hidden_size)
+
+        # 选项b/c: 投影后归一化
+        if self.proj_type in ("linear_norm", "linear_act_norm"):
+            self.proj_norm = nn.LayerNorm(config.hidden_size)
 
     def forward(self, input_ids=None, token_type_ids=None, position_ids=None, **kwargs):
         # 获取BERT原始嵌入词向量
@@ -57,16 +74,24 @@ class CustomEmbeddings(BertEmbeddings):
         else:
             stance_emb = torch.zeros_like(embeddings)
 
-        # 拼接 [embeddings, toxic_emb, stance_emb] + 线性投影回hidden_size
+        # 拼接 [embeddings, toxic_emb, stance_emb] + 投影
         concat_emb = torch.cat([embeddings, toxic_emb, stance_emb], dim=-1)
         embeddings = self.projection(concat_emb)
+
+        # 选项c: GELU激活
+        if self.proj_type == "linear_act_norm":
+            embeddings = F.gelu(embeddings)
+
+        # 选项b/c: LayerNorm归一化
+        if self.proj_type in ("linear_norm", "linear_act_norm"):
+            embeddings = self.proj_norm(embeddings)
 
         return embeddings
 
 # ============= BERT特征提取 ============
 class ModifiedBert(nn.Module):
 
-    def __init__(self, bert_path, freeze_layers=12, num_toxic_types=6):
+    def __init__(self, bert_path, freeze_layers=12, num_toxic_types=6, proj_type="linear"):
         super(ModifiedBert, self).__init__()
         self.virgin_bert = BertModel.from_pretrained(bert_path)  # 加载原始BERT模型
 
@@ -74,7 +99,8 @@ class ModifiedBert(nn.Module):
         self.virgin_bert.embeddings = CustomEmbeddings(
             self.virgin_bert.config,
             self.virgin_bert.embeddings,  # 带原始权重的BERT嵌入层
-            num_toxic_types
+            num_toxic_types,
+            proj_type
         )
 
         self.freeze_bert_layers(freeze_layers)  # 冻结BERT的指定层数

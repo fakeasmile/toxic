@@ -82,7 +82,8 @@ def init():
         "max_len": base_config.max_len,
         "dropout_rate": base_config.dropout_rate,
         "freeze_bert_layers": base_config.freeze_bert_layers,
-        "num_toxic_types": base_config.num_toxic_types
+        "num_toxic_types": base_config.num_toxic_types,
+        "proj_type": base_config.proj_type
     }
 
     config_file = base_config.experiment_path / "config.json"
@@ -264,7 +265,7 @@ def final_train(base_config):
     )
 
     # ---------------- 2. 模型初始化 ----------------
-    bert_model = ModifiedBert(base_config.bert_path, base_config.freeze_bert_layers, base_config.num_toxic_types).to(device)
+    bert_model = ModifiedBert(base_config.bert_path, base_config.freeze_bert_layers, base_config.num_toxic_types, base_config.proj_type).to(device)
     fnn = FC(base_config.dropout_rate).to(device)
 
     epochs = base_config.epochs

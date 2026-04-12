@@ -21,6 +21,9 @@ class BaseConfig():
         self.freeze_bert_layers = 0  # 冻结BERT模型前freeze_bert_layers层
         self.num_toxic_types=6  # 词典lexicon中毒性类别数
 
+        # 嵌入层投影类型: "linear"/"linear_norm"/"linear_act_norm"
+        self.proj_type = "linear_norm"
+
         # 训练超参数
         self.batch_size = 64  # 批次大小
         self.lr = 1e-5  # 学习率
