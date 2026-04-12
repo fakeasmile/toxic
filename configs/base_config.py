@@ -22,7 +22,7 @@ class BaseConfig():
         self.num_toxic_types=6  # 词典lexicon中毒性类别数
 
         # 嵌入层投影类型: "linear"/"linear_norm"/"linear_act_norm"
-        self.proj_type = "linear_norm"
+        self.proj_type = "linear"
 
         # 训练超参数
         self.batch_size = 64  # 批次大小

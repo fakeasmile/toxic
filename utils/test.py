@@ -158,6 +158,6 @@ if __name__ == '__main__':
     project_root = Path(__file__).parent.parent
     
     # 指定测试的实验目录（使用绝对路径）
-    experiment_dir = project_root / "experiments" / "20260411-231034"
+    experiment_dir = project_root / "experiments" / "20260412-114209"
     
     test(experiment_dir)
