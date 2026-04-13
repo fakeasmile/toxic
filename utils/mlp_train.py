@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
 from models.mlp import MLP
 import matplotlib
 import matplotlib.pyplot as plt
@@ -121,15 +122,15 @@ def plot_metrics(mlp_config, epochs, losses, f1_scores, precisions, recalls):
     ax2 = ax1.twinx()
 
     # 绘制验证集损失 (左轴)
-    lns1 = ax1.plot(epochs, losses, color='tab:red', label='Test Loss')
+    lns1 = ax1.plot(epochs, losses, color='tab:red', label='Val Loss')
     ax1.set_xlabel('Epochs')
     ax1.set_ylabel('Loss', color='tab:red')
     ax1.tick_params(axis='y', labelcolor='tab:red')
 
     # 绘制验证集 F1, Precision, Recall (右轴)
-    lns2 = ax2.plot(epochs, f1_scores, color='tab:blue', label='Test F1')
-    lns3 = ax2.plot(epochs, precisions, color='tab:green', linestyle='--', label='Test Precision')
-    lns4 = ax2.plot(epochs, recalls, color='tab:orange', linestyle=':', label='Test Recall')
+    lns2 = ax2.plot(epochs, f1_scores, color='tab:blue', label='Val F1')
+    lns3 = ax2.plot(epochs, precisions, color='tab:green', linestyle='--', label='Val Precision')
+    lns4 = ax2.plot(epochs, recalls, color='tab:orange', linestyle=':', label='Val Recall')
 
     ax2.set_ylabel('Score', color='black')
     ax2.tick_params(axis='y', labelcolor='black')
@@ -148,16 +149,28 @@ def plot_metrics(mlp_config, epochs, losses, f1_scores, precisions, recalls):
     plt.close()
 
 
-def train(mlp_config, train_data, test_data):
+def train(mlp_config, train_data):
 
     batch_size = mlp_config.batch_size
     epochs = mlp_config.epochs
 
-    # 加载数据
-    train_x, train_y = train_data
-    test_x, test_y = test_data
+    # 从训练集中按9:1比例划分验证集（分层抽样）
+    full_train_x, full_train_y = train_data
+    train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
+        full_train_x.numpy(), full_train_y.numpy(),
+        test_size=0.1,
+        stratify=full_train_y.numpy(),
+        random_state=mlp_config.seed
+    )
+    train_x = torch.tensor(train_x_np, dtype=torch.float32)
+    val_x = torch.tensor(val_x_np, dtype=torch.float32)
+    train_y = torch.tensor(train_y_np, dtype=torch.long)
+    val_y = torch.tensor(val_y_np, dtype=torch.long)
+
+    print(f">>> 训练集样本数: {len(train_x)}, 验证集样本数: {len(val_x)}")
+
     train_loader = DataLoader(TensorDataset(train_x, train_y), batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(TensorDataset(val_x, val_y), batch_size=batch_size, shuffle=False)
 
     # 加载模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -209,7 +222,7 @@ def train(mlp_config, train_data, test_data):
         all_preds, all_labels = [], []
         total_val_loss = 0.0
         with torch.no_grad():
-            for val_x, val_y in test_loader:
+            for val_x, val_y in val_loader:
                 val_x, val_y = val_x.to(device), val_y.to(device)
 
                 val_outputs = model(val_x)
@@ -223,7 +236,7 @@ def train(mlp_config, train_data, test_data):
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(val_y.cpu().numpy())
 
-        avg_val_loss = total_val_loss / len(test_loader)
+        avg_val_loss = total_val_loss / len(val_loader)
 
         # 计算指标
         current_f1 = f1_score(all_labels, all_preds, average='macro')
@@ -257,5 +270,4 @@ def train(mlp_config, train_data, test_data):
 if __name__ == '__main__':
     mlp_config = init()
     train_data = load_data(mlp_config, f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json")
-    test_data = load_data(mlp_config, f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json")
-    train(mlp_config, train_data, test_data)
+    train(mlp_config, train_data)
