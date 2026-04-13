@@ -20,7 +20,7 @@ def evaluate_best_model(model_timestamp: str):
 
     # 2. 加载测试数据
     print(">>> 正在加载测试数据...")
-    test_x, test_y = load_data(mlp_config, "test_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json")
+    test_x, test_y = load_data(mlp_config, f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json")
     test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=32, shuffle=False)
 
     # 3. 初始化模型并加载权重
