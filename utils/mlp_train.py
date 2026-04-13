@@ -2,7 +2,7 @@ from configs.MLP_config import MLPConfig
 import json
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, random_split
 import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
 from models.mlp import MLP
@@ -152,11 +152,24 @@ def train(mlp_config, train_data, test_data):
 
     batch_size = mlp_config.batch_size
     epochs = mlp_config.epochs
+    
+    # 验证集比例 (从训练集中划分 10% 作为验证集)
+    val_ratio = 0.1
 
     # 加载数据
     train_x, train_y = train_data
     test_x, test_y = test_data
-    train_loader = DataLoader(TensorDataset(train_x, train_y), batch_size=batch_size, shuffle=True)
+    
+    # 从训练集中划分验证集，修复数据泄露问题
+    train_dataset = TensorDataset(train_x, train_y)
+    train_size = int((1 - val_ratio) * len(train_dataset))
+    val_size = len(train_dataset) - train_size
+    train_subset, val_subset = random_split(train_dataset, [train_size, val_size], 
+                                             generator=torch.Generator().manual_seed(mlp_config.seed))
+    
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
+    # 测试集仅用于最终评估，不参与训练过程
     test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=batch_size, shuffle=False)
 
     # 加载模型
@@ -204,12 +217,12 @@ def train(mlp_config, train_data, test_data):
 
             scheduler.step()
 
-        # 验证集上验证
+        # 验证集上验证 (使用从训练集划分的验证集，而非测试集)
         model.eval()
         all_preds, all_labels = [], []
         total_val_loss = 0.0
         with torch.no_grad():
-            for val_x, val_y in test_loader:
+            for val_x, val_y in val_loader:
                 val_x, val_y = val_x.to(device), val_y.to(device)
 
                 val_outputs = model(val_x)
@@ -223,7 +236,7 @@ def train(mlp_config, train_data, test_data):
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(val_y.cpu().numpy())
 
-        avg_val_loss = total_val_loss / len(test_loader)
+        avg_val_loss = total_val_loss / len(val_loader)
 
         # 计算指标
         current_f1 = f1_score(all_labels, all_preds, average='macro')
@@ -250,6 +263,49 @@ def train(mlp_config, train_data, test_data):
         model_save_path = mlp_config.experiment_path / "best_model.pth"
         torch.save(best_mlp_status_dict, model_save_path)
         print(f">>> 最佳模型已保存至: {model_save_path}")
+    # 在测试集上进行最终评估 (不参与训练过程，仅用于报告最终性能)
+    print("\n" + "="*60)
+    print("在独立测试集上进行最终评估")
+    print("="*60)
+    model.load_state_dict(best_mlp_status_dict)
+    model.eval()
+    all_test_preds, all_test_labels = [], []
+    total_test_loss = 0.0
+    with torch.no_grad():
+        for test_x_batch, test_y_batch in test_loader:
+            test_x_batch, test_y_batch = test_x_batch.to(device), test_y_batch.to(device)
+            test_outputs = model(test_x_batch)
+            t_loss = criterion(test_outputs, test_y_batch)
+            total_test_loss += t_loss.item()
+            preds = torch.argmax(torch.softmax(test_outputs, dim=1), dim=1)
+            all_test_preds.extend(preds.cpu().numpy())
+            all_test_labels.extend(test_y_batch.cpu().numpy())
+    
+    avg_test_loss = total_test_loss / len(test_loader)
+    test_f1 = f1_score(all_test_labels, all_test_preds, average='macro')
+    test_precision = precision_score(all_test_labels, all_test_preds, average='macro', zero_division=0)
+    test_recall = recall_score(all_test_labels, all_test_preds, average='macro', zero_division=0)
+    
+    print(f"测试集 Loss: {avg_test_loss:.4f}")
+    print(f"测试集 F1: {test_f1:.4f}")
+    print(f"测试集 Precision: {test_precision:.4f}")
+    print(f"测试集 Recall: {test_recall:.4f}")
+    
+    # 保存测试集评估结果到文件
+    test_results = {
+        "avg_loss": avg_test_loss,
+        "f1_macro": test_f1,
+        "precision_macro": test_precision,
+        "recall_macro": test_recall,
+        "predictions": all_test_preds,
+        "labels": all_test_labels
+    }
+    test_results_path = mlp_config.experiment_path / "test_results.json"
+    with open(test_results_path, 'w', encoding='utf-8') as f:
+        json.dump(test_results, f, indent=2, ensure_ascii=False)
+    print(f">>> 测试集结果已保存至：{test_results_path}")
+    print("="*60 + "\n")
+    
     # 调用绘图函数
     plot_metrics(mlp_config, epoch_list, loss_history, f1_history, precision_history, recall_history)
 
