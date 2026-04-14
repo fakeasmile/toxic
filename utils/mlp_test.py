@@ -31,7 +31,12 @@ def evaluate_best_model(model_timestamp: str):
     contents = [item["content"] for item in raw_concept_data]
 
     # 3. 初始化模型并加载权重
-    model = MLP(in_features=test_x.shape[1])
+    # 使用配置文件中的超参数初始化模型，确保与训练时一致
+    model = MLP(
+        in_features=test_x.shape[1],
+        dropout_rate=mlp_config.dropout_rate,
+        hidden_features=mlp_config.hidden_features
+    )
     experiment_dir = mlp_config.experiment_path / model_timestamp
     model_path = experiment_dir / "best_model.pth"
 
@@ -121,4 +126,4 @@ def evaluate_best_model(model_timestamp: str):
 
 
 if __name__ == '__main__':
-    evaluate_best_model("20260413-235111")
+    evaluate_best_model("20260414-090839")
