@@ -6,7 +6,7 @@ class MLPConfig():
         # ========== 路径相关配置（公共配置）==========
         self.base_path = Path(__file__).parent.parent  # 基目录
 
-        self.dataset_name = "COLD"  # 数据集名称（TOXICN/COLD）
+        self.dataset_name = "TOXICN"  # 数据集名称（TOXICN/COLD）
         self.train_path = self.base_path / "data" / "raw" / self.dataset_name / "train.json"  # 训练数据集路径
         self.test_path = self.base_path / "data" / "raw" / self.dataset_name / "test.json"  # 测试集路径
         self.experiment_path = self.base_path / "experiments"  # 实验结果保存目录
@@ -14,6 +14,9 @@ class MLPConfig():
         self.adjective_path = self.base_path / "data" / "raw" / "adjective" / "toxic_adjectives.csv"  # 形容词词典路径
         self.models_path = self.base_path / "models"  # LLM模型路径
         self.model_name = "Qwen2.5-1.5B-Instruct"
+
+        self.train_concept_path = self.processed_path / f"train_with_concepts({self.dataset_name})({self.model_name}).json"  # 形容词概念向量训练数据集路径
+        self.test_concept_path = self.processed_path / f"test_with_concepts({self.dataset_name})({self.model_name}).json"  # 形容词概念向量训练数据集路径
 
         # ========== 随机种子配置（公共配置）==========
         self.seed = 1  # 随机种子
@@ -34,7 +37,18 @@ class MLPConfig():
         self.dropout_rate = 0.3  # Dropout 比率
         self.hidden_features = 96  # 隐藏层特征维度
 
+    def __repr__(self):
+        """返回配置对象的字符串表示，包含所有配置项"""
+        lines = [f"{self.__class__.__name__}:"]
+        for key, value in sorted(self.__dict__.items()):
+            lines.append(f"  {key}: {value}")
+        return "\n".join(lines)
+
+    def __str__(self):
+        """返回配置对象的友好字符串表示"""
+        return self.__repr__()
+
 
 if __name__ == '__main__':
     config = MLPConfig()
-    print(config.base_path)
+    print(config)
