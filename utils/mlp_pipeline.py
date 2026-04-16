@@ -1,4 +1,4 @@
-"""MLP 训练与测试统一流水线。
+"""MLP训练与测试。
 
 整合训练和测试功能,实现训练完成后自动测试的流水线。
 支持命令行参数配置,确保训练-测试配置一致性。
@@ -13,8 +13,6 @@
     # 3. 仅测试模式 (必须指定实验时间戳)
     python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
 
-    # 上述均使用MLP_config中默认参数配置
-
     # 4. 自定义数据集和超参数（完整命令）
     python utils/mlp_pipeline.py --mode all \\
         --dataset_name COLD \\
@@ -28,6 +26,8 @@
         --anneal_strategy cos \\
         --dropout_rate 0.4 \\
         --hidden_features 128 \\
+        --use_deterministic \\
+        --seed 42
     
     # 5. 启用确定性模式 (确保实验可复现)
     python utils/mlp_pipeline.py --mode all --use_deterministic --seed 42
@@ -54,12 +54,12 @@
         --final_div_factor  最终学习率除数 (默认: 10000.0)
         --anneal_strategy   衰减策略: cos (余弦) 或 linear (线性), 默认: cos
     
-    模型结构参数:
+    MLP模型结构参数:
         --dropout_rate      Dropout比率 (默认: 0.3)
         --hidden_features   隐藏层维度 (默认: 96)
 
 参数优先级:
-    - 训练模式: 命令行参数 > MLP_config.py 默认值（命令行参数覆盖MLP_config参数）
+    - 训练模式: 命令行参数 > MLP_config.py（命令行参数覆盖MLP_config参数）
     - 测试模式: 强制使用实验目录的 config.json (忽略命令行超参数)
 
 输出文件:
@@ -73,13 +73,14 @@
             └── predictions.json     # 逐条预测结果
 
 注意事项:
-    1. 运行前需确保已生成概念向量文件 (使用 scripts/generate_adjective_c_r.py)
+    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_adjective_c_r.py)
     2. 测试模式必须指定有效的实验时间戳
 """
 
 import argparse
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
 import torch
@@ -103,26 +104,8 @@ if str(project_root) not in sys.path:
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
 
 
-class DictObject:
-    """将字典转换为支持点号访问的对象，使 load_data 等函数可以统一使用 config.attr 访问方式。
-
-    用于 evaluate_best_model 中将从 config.json 加载的 dict 转换为对象，
-    以兼容 load_data 函数的点号属性访问方式。
-    """
-    def __init__(self, d):
-        for key, value in d.items():
-            setattr(self, key, value)
-
-    def __repr__(self):
-        return f"DictObject({self.__dict__})"
-
-
 def parse_args():
-    """解析命令行参数。
-
-    Returns:
-        argparse.Namespace: 解析后的参数对象
-    """
+    """解析命令行参数"""
     parser = argparse.ArgumentParser(
         description="MLP 训练与测试统一流水线",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -165,7 +148,7 @@ def parse_args():
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')
-    parser.add_argument('--use_deterministic', action='store_true', default=None, help='启用确定性模式')
+    parser.add_argument('--use_deterministic', action='store_true', default=False, help='启用确定性模式')
 
     # 训练超参数
     parser.add_argument('--batch_size', type=int, default=None, help='批次大小')
@@ -192,11 +175,10 @@ def update_MLPConfig(args):
 
     # 用命令行参数更新配置对象
     if args.dataset_name is not None:
-        # 数据集，TOXICN/COLD，更新数据集路径和形容词概念向量的部分路径
         mlp_config.dataset_name = args.dataset_name
 
     if args.model_name is not None:
-        # LLM模型
+        # 更新LLM模型
         mlp_config.model_name = args.model_name
 
     mlp_config.train_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "train.json"
@@ -209,8 +191,8 @@ def update_MLPConfig(args):
         mlp_config.seed = args.seed
 
     # 确定性模式
-    if args.use_deterministic:  # store_true 默认为 False，只有显式传入才为 True
-        mlp_config.use_deterministic = args.use_deterministic
+    if args.use_deterministic:  # store_true默认为False，只有显式传入才为True
+        mlp_config.use_deterministic = True
 
     # 训练超参数
     if args.batch_size is not None:
@@ -235,123 +217,6 @@ def update_MLPConfig(args):
         mlp_config.hidden_features = args.hidden_features
 
     return mlp_config
-
-
-def load_config_only_from_experiment(timestamp, base_path):
-    """从timestamp实验目录加载训练时保存的config.json配置。
-
-    Args:
-        timestamp: 实验时间戳
-        base_path: 项目根路径
-
-    Returns:
-        tuple: (config_dict, experiment_dir) 配置字典和实验目录路径
-    """
-    experiment_dir = base_path / "experiments" / timestamp  # 某次实验的目录
-
-    # 检查实验目录存在性
-    if not experiment_dir.exists():
-        raise FileNotFoundError(
-            f"❌ 实验目录不存在: {experiment_dir}\n"
-            f"   请检查时间戳是否正确,或先运行训练模式。"
-        )
-
-    # 检查配置文件存在性
-    config_path = experiment_dir / "config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"❌ 配置文件缺失: {config_path}\n"
-            f"   实验目录不完整,无法进行测试。"
-        )
-
-    # 读取并验证配置文件
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            saved_config = json.load(f)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"❌ 配置文件格式错误: {config_path}\n"
-            f"   错误详情: {e}"
-        )
-
-    return saved_config, experiment_dir
-
-
-def init(config):
-    """
-    1. 生成时间戳实验目录，相关信息输出到控制台（在experiment_dir基础上加时间戳后缀，此时config.experiment_dir=.../experiment/时间戳））
-    2. 完整参数配置保存到config.json中
-    """
-    # 生成时间戳并创建实验目录
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    experiment_dir = config.experiment_path / timestamp
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-    config.experiment_path = experiment_dir
-
-    if config.use_deterministic:
-        from utils.seed import set_reproducibility
-        set_reproducibility(config)
-        print(">>> 已启用确定性模式 (Reproducibility Enabled)")
-    else:
-        print(">>> 已禁用确定性模式 (Randomness Enabled),结果将不可复现")
-
-    # 打印关键配置参数到控制台
-    print("\n" + "="*60)
-    print("MLP 训练配置参数")
-    print("="*60)
-    print(f"实验目录: {config.experiment_path}")
-    print(f"时间戳: {timestamp}")
-    print("\n--- 数据集配置 ---")
-    print(f"数据集名称: {config.dataset_name}")
-    print(f"模型名称: {config.model_name}")
-    print(f"训练集路径: {config.train_path}")
-    print(f"测试集路径: {config.test_path}")
-    print("\n--- 训练超参数 ---")
-    print(f"批次大小 (batch_size): {config.batch_size}")
-    print(f"训练轮数 (epochs): {config.epochs}")
-    print(f"峰值学习率 (max_lr): {config.max_lr}")
-    print(f"Warmup比例 (pct_start): {config.pct_start}")
-    print(f"初始学习率除数 (div_factor): {config.div_factor}")
-    print(f"最终学习率除数 (final_div_factor): {config.final_div_factor}")
-    print(f"衰减策略 (anneal_strategy): {config.anneal_strategy}")
-    print("\n--- 模型结构参数 ---")
-    print(f"Dropout比率: {config.dropout_rate}")
-    print(f"隐藏层维度: {config.hidden_features}")
-    print("\n--- 随机种子配置 ---")
-    print(f"随机种子 (seed): {config.seed}")
-    print(f"确定性模式: {config.use_deterministic}")
-    print("="*60 + "\n")
-
-    # 保存完整配置到JSON文件
-    config_dict = {
-        "timestamp": timestamp,
-        "experiment_path": str(config.experiment_path),
-        "dataset_name": config.dataset_name,
-        "model_name": config.model_name,
-        "train_path": str(config.train_path),
-        "test_path": str(config.test_path),
-        "train_concept_path": str(config.train_concept_path),
-        "test_concept_path": str(config.test_concept_path),
-        "processed_path": str(config.processed_path),
-        "seed": config.seed,
-        "use_deterministic": config.use_deterministic,
-        "batch_size": config.batch_size,
-        "epochs": config.epochs,
-        "max_lr": config.max_lr,
-        "pct_start": config.pct_start,
-        "div_factor": config.div_factor,
-        "final_div_factor": config.final_div_factor,
-        "anneal_strategy": config.anneal_strategy,
-        "dropout_rate": config.dropout_rate,
-        "hidden_features": config.hidden_features
-    }
-
-    config_file = config.experiment_path / "config.json"
-    with open(config_file, 'w', encoding='utf-8') as f:
-        json.dump(config_dict, f, indent=2, ensure_ascii=False)
-    print(f">>> 配置文件已保存至: {config_file}\n")
-
-    return config
 
 
 def load_data(config, mode):
@@ -566,21 +431,57 @@ def train(config, train_data):
     plot_metrics(config, epoch_list, loss_history, f1_history, precision_history, recall_history)
 
 
+def load_config_only_from_experiment(timestamp, base_path):
+    """从timestamp实验目录加载训练时保存的config.json配置。
+
+    Args:
+        timestamp: 实验时间戳
+        base_path: 项目根路径
+
+    Returns:
+        tuple: (config_dict, experiment_dir) 配置字典和实验目录路径
+    """
+    experiment_dir = base_path / "experiments" / timestamp  # 某次实验的目录
+
+    # 检查实验目录存在性
+    if not experiment_dir.exists():
+        raise FileNotFoundError(
+            f"❌ 实验目录不存在: {experiment_dir}\n"
+            f"   请检查时间戳是否正确,或先运行训练模式。"
+        )
+
+    # 检查配置文件存在性
+    config_path = experiment_dir / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"❌ 配置文件缺失: {config_path}\n"
+            f"   实验目录不完整,无法进行测试。"
+        )
+
+    # 读取并验证配置文件
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            saved_config = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"❌ 配置文件格式错误: {config_path}\n"
+            f"   错误详情: {e}"
+        )
+
+    return saved_config, experiment_dir
+
+
 def evaluate_best_model(base_path, timestamp):
     """评估最佳模型"""
-    # 从实验目录的config.json中加载参数配置
+    # 只从实验目录的config.json中加载参数配置
     saved_config, experiment_dir = load_config_only_from_experiment(timestamp, base_path)
+    saved_config = SimpleNamespace(**saved_config)  # 将字典转换为支持.属性访问
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> 正在使用设备: {device}")
 
-    # 恢复训练时的随机种子设置（确保可复现性）
-    if saved_config.get('use_deterministic', False):
-        from utils.seed import set_reproducibility
-        # 创建临时配置对象用于设置种子
-        temp_config = DictObject(saved_config)
-        set_reproducibility(temp_config)
-        print(">>> 已恢复训练时的确定性模式设置")
+    # 恢复训练时的随机种子设置，确保可复现性
+    set_seed(saved_config)
 
     # 检查模型文件存在性
     model_path = experiment_dir / "best_model.pth"
@@ -591,20 +492,20 @@ def evaluate_best_model(base_path, timestamp):
 
     # 加载测试数据
     print(">>> 正在加载测试数据...")
-    test_x, test_y = load_data(DictObject(saved_config), "test")
-    batch_size = int(saved_config['batch_size'])  # 确保类型为 int
+    test_x, test_y = load_data(saved_config, "test")
+    batch_size = int(saved_config.batch_size)  # 确保类型为 int
     test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=batch_size, shuffle=False)
 
     # 从概念向量文件中加载原始文本内容（逐条保存预测结果）
-    with open(saved_config["test_concept_path"], "r", encoding="utf-8") as f:
+    with open(saved_config.test_concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
     contents = [item["content"] for item in raw_concept_data]
 
     # 初始化模型 (使用训练时的配置)
     model = MLP(
         in_features=test_x.shape[1],
-        dropout_rate=saved_config['dropout_rate'],
-        hidden_features=saved_config['hidden_features']
+        dropout_rate=saved_config.dropout_rate,
+        hidden_features=saved_config.hidden_features
     )
 
     try:
@@ -701,38 +602,86 @@ def evaluate_best_model(base_path, timestamp):
 
 def load_dynamic_config(args):
     """
-    加载MLP_config，并依据命令行参数构建最终参数
+    1. 加载MLP_config，并依据命令行参数构建最终参数
+    2. 生成时间戳实验目录，并更新experiment_path（在experiment_path基础上加时间戳后缀）
+    3. 完整参数配置保存到config.json中
     """
+    # 1. 加载MLP_config，并依据命令行参数构建最终参数
     updated_config = update_MLPConfig(args)  # 用解析的命令行参数更新MLPConfig()中的参数
-    final_config = init(updated_config)
 
-    """
-        final_config:
-            adjective_path: D:\toxicnew\data\raw\adjective\toxic_adjectives.csv
-            anneal_strategy: cos
-            base_path: D:\toxicnew
-            batch_size: 16
-            dataset_name: TOXICN
-            div_factor: 25.0
-            dropout_rate: 0.3
-            epochs: 200
-            experiment_path: D:\toxicnew\experiments\20260415-214146  # 原始只到../experiments/，时间戳在init()中生成
-            final_div_factor: 10000.0
-            hidden_features: 96
-            max_lr: 0.001
-            model_name: Qwen2.5-1.5B-Instruct
-            models_path: D:\toxicnew\models
-            pct_start: 0.2
-            processed_path: D:\toxicnew\data\processed
-            seed: 1
-            test_concept_path: D:\toxicnew\data\processed\test_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json
-            test_path: D:\toxicnew\data\raw\TOXICN\test.json
-            train_concept_path: D:\toxicnew\data\processed\train_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json
-            train_path: D:\toxicnew\data\raw\TOXICN\train.json
-            use_deterministic: False
-        final_config基于MLP_config.py，用命令行参数进行了修改，并保存到config.json中
-        """
-    return final_config
+    # 2. 生成时间戳并创建实验目录
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    experiment_dir = updated_config.experiment_path / timestamp
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    updated_config.experiment_path = experiment_dir
+
+    # 打印关键配置参数到控制台
+    print("\n" + "=" * 60)
+    print("MLP 训练配置参数")
+    print("=" * 60)
+    print(f"实验目录: {updated_config.experiment_path}")
+    print(f"时间戳: {timestamp}")
+    print("\n--- 数据集配置 ---")
+    print(f"数据集名称: {updated_config.dataset_name}")
+    print(f"模型名称: {updated_config.model_name}")
+    print(f"训练集路径: {updated_config.train_path}")
+    print(f"测试集路径: {updated_config.test_path}")
+    print("\n--- 训练超参数 ---")
+    print(f"批次大小 (batch_size): {updated_config.batch_size}")
+    print(f"训练轮数 (epochs): {updated_config.epochs}")
+    print(f"峰值学习率 (max_lr): {updated_config.max_lr}")
+    print(f"Warmup比例 (pct_start): {updated_config.pct_start}")
+    print(f"初始学习率除数 (div_factor): {updated_config.div_factor}")
+    print(f"最终学习率除数 (final_div_factor): {updated_config.final_div_factor}")
+    print(f"衰减策略 (anneal_strategy): {updated_config.anneal_strategy}")
+    print("\n--- 模型结构参数 ---")
+    print(f"Dropout比率: {updated_config.dropout_rate}")
+    print(f"隐藏层维度: {updated_config.hidden_features}")
+    print("\n--- 随机种子配置 ---")
+    print(f"随机种子 (seed): {updated_config.seed}")
+    print(f"确定性模式: {updated_config.use_deterministic}")
+    print("=" * 60 + "\n")
+
+    # 3. 保存完整配置到config.json文件
+    config_dict = {
+        "timestamp": timestamp,
+        "experiment_path": str(updated_config.experiment_path),
+        "dataset_name": updated_config.dataset_name,
+        "model_name": updated_config.model_name,
+        "train_path": str(updated_config.train_path),
+        "test_path": str(updated_config.test_path),
+        "train_concept_path": str(updated_config.train_concept_path),
+        "test_concept_path": str(updated_config.test_concept_path),
+        "processed_path": str(updated_config.processed_path),
+        "seed": updated_config.seed,
+        "use_deterministic": updated_config.use_deterministic,
+        "batch_size": updated_config.batch_size,
+        "epochs": updated_config.epochs,
+        "max_lr": updated_config.max_lr,
+        "pct_start": updated_config.pct_start,
+        "div_factor": updated_config.div_factor,
+        "final_div_factor": updated_config.final_div_factor,
+        "anneal_strategy": updated_config.anneal_strategy,
+        "dropout_rate": updated_config.dropout_rate,
+        "hidden_features": updated_config.hidden_features
+    }
+
+    config_file = updated_config.experiment_path / "config.json"
+    with open(config_file, 'w', encoding='utf-8') as f:
+        json.dump(config_dict, f, indent=2, ensure_ascii=False)
+    print(f">>> 配置文件已保存至: {config_file}\n")
+
+    return updated_config
+
+
+def set_seed(config):
+    # 确定性模式
+    if config.use_deterministic:
+        from utils.seed import set_reproducibility
+        set_reproducibility(config)
+        print(">>> 已启用确定性模式 (Reproducibility Enabled)")
+    else:
+        print(">>> 已禁用确定性模式 (Randomness Enabled),结果将不可复现")
 
 def main():
     """
@@ -743,20 +692,23 @@ def main():
 
     # 训练
     if args.mode in ['all', 'train']:
-        # 获取参数配置
+        # 获取完整参数配置
         final_config = load_dynamic_config(args)
 
+        # 是否启用确定性模式
+        set_seed(final_config)
+
         print("\n>>> 开始训练流程...")
-        train_data = load_data(final_config, "train")
+        train_data = load_data(final_config, "train")  # 加载训练数据
         train(final_config, train_data)
         print("\n>>> 训练流程完成!")
 
-    if args.mode == 'all':
-        print("\n>>> 开始测试流程...")
-        timestamp = final_config.experiment_path.name  # 获取实验时间戳
-        evaluate_best_model(final_config.base_path, timestamp)
-        print("\n>>> 完整流水线执行完成!")
-
+        # all模式下执行测试
+        if args.mode == 'all':
+            print("\n>>> 开始测试流程...")
+            timestamp = final_config.experiment_path.name  # 获取实验时间戳
+            evaluate_best_model(final_config.base_path, timestamp)
+            print("\n>>> 测试执行完成!")
 
     # 测试模式:从实验目录读取配置，不接受任何命令行参数
     if args.mode == 'test':
