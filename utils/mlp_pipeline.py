@@ -92,13 +92,13 @@ from sklearn.model_selection import train_test_split
 import matplotlib
 import matplotlib.pyplot as plt
 
-from configs.MLP_config import MLPConfig
-from models.mlp import MLP
-
 # 添加项目根目录到 Python 路径
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+from configs.MLP_config import MLPConfig
+from models.mlp import MLP
 
 # 配置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']

@@ -1,5 +1,6 @@
 """生成形容词概念向量（基于肯定词概率和）。"""
-
+import argparse
+import sys
 from pathlib import Path
 import json
 
@@ -9,14 +10,35 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from configs.MLP_config import MLPConfig
 
 
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description="生成形容词概念向量",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="使用示例:python scripts/generate_adjective_c_r.py --mode [train/test]")
+
+    # 运行模式
+    parser.add_argument(
+        '--mode',
+        type=str,
+        choices=['train', 'test'],
+        default='test',
+        help='train:生成训练集的形容词概念向量，test:生成测试集的形容词概念向量'
+    )
+
+    return parser.parse_args()
+
 def load_qwen_model(model_path: Path, model_name: str):
     """加载模型和分词器"""
-    full_path = model_path / model_name
-    # full_path = model_path / "Qwen2.5-3B-Instruct"
-    print(f"Loading Qwen model from {full_path}")
+    llm_path = model_path / model_name  # LLM模型路径
+    print(f"Loading Qwen model from {llm_path}")
 
 
     quant_config = BitsAndBytesConfig(
@@ -27,7 +49,7 @@ def load_qwen_model(model_path: Path, model_name: str):
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
-        full_path,
+        llm_path,
         trust_remote_code=True,
         padding_side="right",  # PAD右填充
     )
@@ -35,7 +57,7 @@ def load_qwen_model(model_path: Path, model_name: str):
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        full_path,
+        llm_path,
         trust_remote_code=True,
         quantization_config=quant_config,
         dtype=torch.float16,
@@ -83,8 +105,8 @@ def _expand_prefix_cache(base_cache, batch_size: int):
     return tuple(expanded_layers)
 
 
-def generate_adj_concept(mlp_config, dataset_name):
-    # 加载模型的分词器
+def generate_adj_concept(mlp_config, mode):
+    # 加载LLM和分词器
     tokenizer, model = load_qwen_model(mlp_config.models_path, mlp_config.model_name)
     device = next(model.parameters()).device
 
@@ -99,10 +121,10 @@ def generate_adj_concept(mlp_config, dataset_name):
     adjectives = pd.read_csv(mlp_config.adjective_path)["chinese"].tolist()
 
     # 读取数据集
-    if dataset_name == "train":
+    if mode == "train":
         with open(mlp_config.train_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
-    elif dataset_name == "test":
+    elif mode == "test":
         with open(mlp_config.test_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
     else:
@@ -219,12 +241,22 @@ def generate_adj_concept(mlp_config, dataset_name):
         if torch.cuda.is_available() and sample_idx % 128 == 0:
             torch.cuda.empty_cache()
 
-    output_path = mlp_config.processed_path / f"{dataset_name}_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
-    with open(output_path, "w", encoding="utf-8") as f:
+    output_concept_path = mlp_config.processed_path / f"{mode}_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
+    with open(output_concept_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
+    print(f"形容词概念向量保存到: {output_concept_path}")
+
+
+def main():
+    args = parse_args()  # 解析命令行参数
+
+    if args.mode is None:
+        print("必须指定train or test模式")
+        sys.exit(1)
+
+    mlp_config = MLPConfig()
+    generate_adj_concept(mlp_config, args.mode)
 
 
 if __name__ == '__main__':
-    mlp_config = MLPConfig()
-    generate_adj_concept(mlp_config, "test")
-    # generate_adj_concept(mlp_config, "train")
+    main()
