@@ -183,8 +183,6 @@ def generate_adj_concept(mlp_config, mode):
     else:
         raise ValueError("dataset_name must be 'train' or 'test'")
 
-    print(output_concept_path)
-    return
     results = []
     batch_size = 16  # 形容词批量推理大小
 
