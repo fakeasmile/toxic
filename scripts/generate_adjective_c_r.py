@@ -22,9 +22,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="生成形容词概念向量",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="使用示例:python scripts/generate_adjective_c_r.py --mode [train/test]")
+        epilog="使用示例:"
+               "python scripts/generate_adjective_c_r.py --mode {train/test} --dataset_name TOXICN --model_name ..."
+    )
 
-    # 运行模式
     parser.add_argument(
         '--mode',
         type=str,
@@ -33,13 +34,61 @@ def parse_args():
         help='train:生成训练集的形容词概念向量，test:生成测试集的形容词概念向量'
     )
 
+    parser.add_argument(
+        '--dataset_name',
+        type=str,
+        default=None,
+        help='数据集名称(TOXICN/COLD)'
+    )
+
+    parser.add_argument(
+        '--model_name',
+        type=str,
+        default=None,
+        help='LLM模型名称'
+    )
+
     return parser.parse_args()
+
+def dynamic_load_parameters(args):
+    """用命令行参数覆盖MLP_config参数
+    
+    注意：必须先更新 dataset_name 和 model_name，再更新依赖它们的路径
+    """
+    mlp_config = MLPConfig()
+    
+    # 第一步：更新基础配置
+    if args.dataset_name is not None:
+        mlp_config.dataset_name = args.dataset_name
+    if args.model_name is not None:
+        mlp_config.model_name = args.model_name
+
+    # 第二步：重新计算所有依赖 dataset_name 和 model_name 的路径
+    # 确保路径与最新的数据集/模型名称一致
+    mlp_config.train_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "train.json"
+    mlp_config.test_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "test.json"
+    mlp_config.train_concept_path = mlp_config.processed_path / f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
+    mlp_config.test_concept_path = mlp_config.processed_path / f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
+    
+    # 打印实际使用的配置，便于调试和验证
+    print("\n" + "=" * 60)
+    print("形容词概念向量生成 - 配置信息")
+    print("=" * 60)
+    print(f"数据集名称: {mlp_config.dataset_name}")
+    print(f"LLM模型名称: {mlp_config.model_name}")
+    print(f"训练集路径: {mlp_config.train_path}")
+    print(f"测试集路径: {mlp_config.test_path}")
+    print(f"形容词词典路径: {mlp_config.adjective_path}")
+    print("=" * 60 + "\n")
+
+    return mlp_config
 
 def load_qwen_model(model_path: Path, model_name: str):
     """加载模型和分词器"""
     llm_path = model_path / model_name  # LLM模型路径
-    print(f"Loading Qwen model from {llm_path}")
-
+    # 判断llm目录是否存在
+    if not llm_path.exists():
+        raise ValueError(f"LLM path {llm_path} does not exist")
 
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,  # 4bit量化
@@ -48,6 +97,7 @@ def load_qwen_model(model_path: Path, model_name: str):
         bnb_4bit_compute_dtype=torch.float16,  # 半精度
     )
 
+    print(f"Loading tokenizer from {llm_path}")
     tokenizer = AutoTokenizer.from_pretrained(
         llm_path,
         trust_remote_code=True,
@@ -56,6 +106,7 @@ def load_qwen_model(model_path: Path, model_name: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print(f"Loading Qwen model from {llm_path}")
     model = AutoModelForCausalLM.from_pretrained(
         llm_path,
         trust_remote_code=True,
@@ -124,12 +175,16 @@ def generate_adj_concept(mlp_config, mode):
     if mode == "train":
         with open(mlp_config.train_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
+        output_concept_path = mlp_config.train_concept_path  # 形容词概念向量保存路径
     elif mode == "test":
         with open(mlp_config.test_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
+        output_concept_path = mlp_config.test_concept_path
     else:
         raise ValueError("dataset_name must be 'train' or 'test'")
 
+    print(output_concept_path)
+    return
     results = []
     batch_size = 16  # 形容词批量推理大小
 
@@ -241,7 +296,6 @@ def generate_adj_concept(mlp_config, mode):
         if torch.cuda.is_available() and sample_idx % 128 == 0:
             torch.cuda.empty_cache()
 
-    output_concept_path = mlp_config.processed_path / f"{mode}_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
     with open(output_concept_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
     print(f"形容词概念向量保存到: {output_concept_path}")
@@ -250,11 +304,7 @@ def generate_adj_concept(mlp_config, mode):
 def main():
     args = parse_args()  # 解析命令行参数
 
-    if args.mode is None:
-        print("必须指定train or test模式")
-        sys.exit(1)
-
-    mlp_config = MLPConfig()
+    mlp_config = dynamic_load_parameters(args)
     generate_adj_concept(mlp_config, args.mode)
 
 
