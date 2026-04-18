@@ -76,9 +76,8 @@ def dynamic_load_parameters(args):
     print("=" * 60)
     print(f"数据集名称: {mlp_config.dataset_name}")
     print(f"LLM模型名称: {mlp_config.model_name}")
-    print(f"训练集路径: {mlp_config.train_path}")
-    print(f"测试集路径: {mlp_config.test_path}")
     print(f"形容词词典路径: {mlp_config.adjective_path}")
+    print(f"当前模式: {args.mode}")
     print("=" * 60 + "\n")
 
     return mlp_config
