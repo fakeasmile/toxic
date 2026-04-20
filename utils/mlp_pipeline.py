@@ -26,6 +26,7 @@
         --anneal_strategy cos
         --dropout_rate 0.4
         --hidden_features 128
+        --patience 20
         --use_deterministic
         --seed 42
     
@@ -57,6 +58,7 @@
     MLP模型结构参数:
         --dropout_rate      Dropout比率 (默认: 0.3)
         --hidden_features   隐藏层维度 (默认: 96)
+        --patience          早停耐心值 (默认: 20)
 
 参数优先级:
     - 训练模式: 命令行参数 > MLP_config.py（命令行参数覆盖MLP_config参数）
@@ -162,6 +164,7 @@ def parse_args():
     # 模型结构参数
     parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
     parser.add_argument('--hidden_features', type=int, default=None, help='隐藏层维度')
+    parser.add_argument('--patience', type=int, default=None, help='早停耐心值 (验证集F1连续patience个epoch未提升则停止)')
 
     return parser.parse_args()
 
@@ -215,6 +218,8 @@ def update_MLPConfig(args):
         mlp_config.dropout_rate = args.dropout_rate
     if args.hidden_features is not None:
         mlp_config.hidden_features = args.hidden_features
+    if args.patience is not None:
+        mlp_config.patience = args.patience
 
     return mlp_config
 
@@ -268,16 +273,17 @@ def load_data(config, mode):
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
-def plot_metrics(config, epochs, losses, f1_scores, precisions, recalls):
+def plot_metrics(config, epochs, losses, f1_scores, precisions, recalls, test_f1_scores):
     """绘制损失与各项评价指标曲线图。
 
     Args:
         config: MLPConfig 配置对象
         epochs: 轮次列表
-        losses: 损失列表
-        f1_scores: F1分数列表
-        precisions: 精确率列表
-        recalls: 召回率列表
+        losses: 验证集损失列表
+        f1_scores: 验证集F1分数列表
+        precisions: 验证集精确率列表
+        recalls: 验证集召回率列表
+        test_f1_scores: 测试集F1分数列表 (仅观察,不参与模型筛选)
     """
     plt.figure(figsize=(12, 7))
     ax1 = plt.gca()
@@ -289,10 +295,11 @@ def plot_metrics(config, epochs, losses, f1_scores, precisions, recalls):
     ax1.set_ylabel('Loss', color='tab:red')
     ax1.tick_params(axis='y', labelcolor='tab:red')
 
-    # 绘制验证集 F1, Precision, Recall (右轴)
+    # 绘制验证集 F1, Precision, Recall + 测试集 F1 (右轴)
     lns2 = ax2.plot(epochs, f1_scores, color='tab:blue', label='Val F1')
     lns3 = ax2.plot(epochs, precisions, color='tab:green', linestyle='--', label='Val Precision')
     lns4 = ax2.plot(epochs, recalls, color='tab:orange', linestyle=':', label='Val Recall')
+    lns5 = ax2.plot(epochs, test_f1_scores, color='tab:purple', linestyle='-.', label='Test F1')
 
     ax2.set_ylabel('Score', color='black')
     ax2.tick_params(axis='y', labelcolor='black')
@@ -300,7 +307,7 @@ def plot_metrics(config, epochs, losses, f1_scores, precisions, recalls):
     plt.title('MLP Training Metrics with Gating Mechanism')
 
     # 合并图例
-    lns = lns1 + lns2 + lns3 + lns4
+    lns = lns1 + lns2 + lns3 + lns4 + lns5
     labs = [l.get_label() for l in lns]
     ax1.legend(lns, labs, loc='lower right')
 
@@ -311,15 +318,17 @@ def plot_metrics(config, epochs, losses, f1_scores, precisions, recalls):
     plt.close()
 
 
-def train(config, train_data):
+def train(config, train_data, test_data):
     """训练MLP模型。
 
     Args:
         config: MLPConfig 配置对象
         train_data: 训练数据 (concepts, labels)
+        test_data: 测试数据 (concepts, labels), 仅用于观察测试集F1变化,不参与模型筛选
     """
     batch_size = config.batch_size
     epochs = config.epochs
+    patience = config.patience
 
     # 从训练集中按9:1比例划分验证集(分层抽样)
     full_train_x, full_train_y = train_data
@@ -338,6 +347,10 @@ def train(config, train_data):
 
     train_loader = DataLoader(TensorDataset(train_x, train_y), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(val_x, val_y), batch_size=batch_size, shuffle=False)
+
+    # 测试集 DataLoader
+    test_x, test_y = test_data
+    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=batch_size, shuffle=False)
 
     # 加载模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -369,7 +382,10 @@ def train(config, train_data):
     # 指标
     best_f1 = 0.0
     best_mlp_status_dict = None
+    best_epoch = 0  # 最佳模型对应的epoch编号
+    epochs_no_improve = 0  # 早停计数器
     epoch_list, loss_history, f1_history, precision_history, recall_history = [], [], [], [], []
+    test_f1_history = []  # 测试集F1 (仅观察)
 
     for epoch in range(epochs):
         model.train()
@@ -401,10 +417,21 @@ def train(config, train_data):
 
         avg_val_loss = total_val_loss / len(val_loader)
 
-        # 计算指标
+        # 计算验证集指标
         current_f1 = f1_score(all_labels, all_preds, average='macro')
         current_precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
         current_recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+
+        # 测试集上计算F1 (仅观察,不参与模型筛选)
+        test_preds, test_labels = [], []
+        with torch.no_grad():
+            for tx, ty in test_loader:
+                tx = tx.to(device)
+                t_outputs = model(tx)
+                t_preds = torch.argmax(t_outputs, dim=1)
+                test_preds.extend(t_preds.cpu().numpy())
+                test_labels.extend(ty.numpy())
+        current_test_f1 = f1_score(test_labels, test_preds, average='macro')
 
         # 保存结果
         epoch_list.append(epoch + 1)
@@ -412,23 +439,36 @@ def train(config, train_data):
         f1_history.append(current_f1)
         precision_history.append(current_precision)
         recall_history.append(current_recall)
+        test_f1_history.append(current_test_f1)
 
-        print(f"Epoch {epoch + 1}: \n>>>Loss = {avg_val_loss:.4f}, \n>>>F1 = {current_f1:.4f}, \n>>>P = {current_precision:.4f}, "
-              f"\n>>>R = {current_recall:.4f}")
+        print(f"Epoch {epoch + 1}: \n>>>Val Loss = {avg_val_loss:.4f}, \n>>>Val F1 = {current_f1:.4f}, "
+              f"\n>>>Val P = {current_precision:.4f}, \n>>>Val R = {current_recall:.4f}, "
+              f"\n>>>Test F1 = {current_test_f1:.4f}")
 
         if current_f1 > best_f1:
-            print(f">>> 发现更优模型 (F1: {current_f1:.4f}),提升:{current_f1 - best_f1:.4f}")
+            print(f">>> 发现更优模型 (Val F1: {current_f1:.4f}), 提升: {current_f1 - best_f1:.4f}")
             best_f1 = current_f1
             best_mlp_status_dict = model.state_dict()
+            best_epoch = epoch + 1
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        # 早停判断
+        if epochs_no_improve >= patience:
+            print(f"\n>>> 早停触发: 验证集F1已连续 {patience} 个epoch未提升, 停止训练")
+            print(f">>> 最佳验证集F1: {best_f1:.4f}")
+            break
 
     # 保存模型
     if best_mlp_status_dict is not None:
         model_save_path = config.experiment_path / "best_model.pth"
         torch.save(best_mlp_status_dict, model_save_path)
         print(f">>> 最佳模型已保存至: {model_save_path}")
+        print(f">>> 最佳模型出现在第 {best_epoch} 个epoch (Val F1: {best_f1:.4f})")
 
     # 调用绘图函数
-    plot_metrics(config, epoch_list, loss_history, f1_history, precision_history, recall_history)
+    plot_metrics(config, epoch_list, loss_history, f1_history, precision_history, recall_history, test_f1_history)
 
 
 def load_config_only_from_experiment(timestamp, base_path):
@@ -637,6 +677,7 @@ def load_dynamic_config(args):
     print("\n--- 模型结构参数 ---")
     print(f"Dropout比率: {updated_config.dropout_rate}")
     print(f"隐藏层维度: {updated_config.hidden_features}")
+    print(f"早停耐心值 (patience): {updated_config.patience}")
     print("\n--- 随机种子配置 ---")
     print(f"随机种子 (seed): {updated_config.seed}")
     print(f"确定性模式: {updated_config.use_deterministic}")
@@ -663,7 +704,8 @@ def load_dynamic_config(args):
         "final_div_factor": updated_config.final_div_factor,
         "anneal_strategy": updated_config.anneal_strategy,
         "dropout_rate": updated_config.dropout_rate,
-        "hidden_features": updated_config.hidden_features
+        "hidden_features": updated_config.hidden_features,
+        "patience": updated_config.patience
     }
 
     config_file = updated_config.experiment_path / "config.json"
@@ -700,7 +742,8 @@ def main():
 
         print("\n>>> 开始训练流程...")
         train_data = load_data(final_config, "train")  # 加载训练数据
-        train(final_config, train_data)
+        test_data = load_data(final_config, "test")  # 加载测试数据 (仅观察F1变化)
+        train(final_config, train_data, test_data)
         print("\n>>> 训练流程完成!")
 
         # all模式下执行测试

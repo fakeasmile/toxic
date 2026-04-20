@@ -36,6 +36,7 @@ class MLPConfig():
         # ========== MLP 模型参数 ==========
         self.dropout_rate = 0.3  # Dropout 比率
         self.hidden_features = 96  # 隐藏层特征维度
+        self.patience = 20  # 早停耐心值 (验证集F1连续patience个epoch未提升则停止训练)
 
     def __repr__(self):
         """返回配置对象的字符串表示，包含所有配置项"""
