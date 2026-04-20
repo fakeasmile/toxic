@@ -1,24 +1,18 @@
 # toxicn
 
-基于 BERT + FNN 的中文有害言论检测与识别系统
+基于形容词概念向量的中文有害言论检测系统
 
 ## 项目简介
 
-本项目是一个面向中文社交媒体的有害言论检测系统，采用 **BERT + FNN（前馈神经网络）** 的架构，结合**毒性词典**和**攻击立场词典**进行多特征融合，实现对有害言论的精准识别。
+本项目是一个面向中文社交媒体的有害言论检测系统，采用**形容词概念向量 + MLP（多层感知机）**的创新架构。通过大型语言模型（LLM）提取文本中形容词的语义概念表示，结合门控机制的MLP分类器实现对有害言论的精准识别。
 
 ### 核心特性
 
-- **多特征融合**：在 BERT 词嵌入层融合毒性词嵌入（toxic embeddings）和攻击立场嵌入（stance embeddings）
-- **学习率动态调度**：支持 OneCycleLR 等学习率调度策略
-- **早停机制**：防止过拟合，提升模型泛化能力
-- **可复现性保证**：支持确定性训练模式
-- **实验管理**：自动化的实验目录管理和结果可视化
-
-> **注意**：本项目包含两个独立任务
-> 1. **BERT+FNN**：基于 BERT 嵌入 + 全连接网络的有害言论检测（使用 TOXICN/COLD 数据集）
-> 2. **MLP**：基于形容词概念向量的 MLP 分类器（使用 LLM 生成的概念向量）
-> 
-> 两个任务目前独立运行，后续将整合为统一框架。超参数搜索模块当前不使用。
+- **形容词概念向量**：利用LLM分析文本中形容词的语义倾向，生成高维概念向量作为特征表示
+- **门控机制MLP**：引入自适应门控单元，动态学习每个形容词特征的重要性权重
+- **OneCycleLR调度**：支持先进的学习率调度策略，提升训练效率和模型性能
+- **可复现性保证**：支持确定性训练模式，确保实验结果可复现
+- **自动化流水线**：集成数据预处理、训练、测试的完整流程
 
 ## 分支管理策略
 
@@ -29,70 +23,52 @@
 > 
 > 如需获取最新稳定版本，请使用主分支；如需实验性功能，请查看对应特性分支。
 
-## 项目结构
-
-```
-toxicn/
-├── configs/                    # 配置文件
-│   ├── base_config.py          # 基础配置（BERT+FNN）
-│   ├── MLP_config.py           # MLP模型配置
-│   └── hyperopt_config.py      # 超参数搜索配置
-├── data/                       # 数据目录
-│   ├── raw/                    # 原始数据
-│   │   ├── COLD/               # COLD数据集
-│   │   ├── TOXICN/             # TOXICN数据集
-│   │   ├── adjective/          # 形容词词典
-│   │   ├── lexicon/            # 毒性词典（general, LGBT, racism, region, sexism）
-│   │   └── attack_stance.json  # 攻击立场词典
-│   └── processed/              # 处理后数据（概念向量）
-├── models/                     # 模型定义
-│   ├── bert.py                 # 改进版BERT（支持自定义嵌入层）
-│   ├── fc.py                   # 全连接分类器
-│   └── mlp.py                  # MLP分类器（带门控机制）
-├── utils/                      # 工具函数
-│   ├── data_preprocess.py      # 数据预处理和Dataset
-│   ├── train.py                # BERT+FNN训练流程
-│   ├── test.py                 # 模型测试与评估
-│   ├── hyperopt.py             # 超参数搜索主逻辑
-│   ├── hyperopt_train.py       # 超参数搜索训练流程
-│   ├── mlp_train.py            # MLP训练流程
-│   ├── mlp_test.py             # MLP测试流程
-│   └── seed.py                 # 随机种子设置
-├── scripts/                    # 分析脚本
-│   ├── analyze_dataset.py      # 数据集统计分析
-│   └── generate_adjective_c_r.py # 生成形容词概念向量
-└── experiments/                # 实验结果保存目录
-```
-
 ## 技术架构
 
-### 1. 模型架构
+### 1. 整体流程
 
 ```
-输入文本
-    ↓
-[CustomEmbeddings] ← toxic_ids, stance_ids
-    ↓
-[BERT Encoder] (冻结底层，训练顶层)
-    ↓
-[Pooler Output] (768维)
-    ↓
-[FC Classifier] (768 → 256 → 2)
-    ↓
-输出（有毒/无毒）
+原始文本 → 形容词概念向量生成 → MLP分类器 → 有毒/无毒判断
+    ↓              ↓                    ↓
+TOXICN/COLD   Qwen2.5 LLM         门控MLP网络
+数据集        提取概念特征        (带注意力机制)
 ```
 
-### 2. 自定义嵌入层
+### 2. 形容词概念向量生成
 
-在标准 BERT 的三种嵌入（Token + Segment + Position）基础上，额外添加：
+使用Qwen2.5系列大语言模型，对文本中的每个形容词进行语义分析：
 
-- **毒性嵌入（Toxic Embeddings）**：标记文本中的脏词位置，支持 6 种毒性类别
-- **攻击立场嵌入（Stance Embeddings）**：标记具有攻击立场的词汇
+1. **构建提示模板**：`"你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答'是'或'否'。"`
+2. **批量推理**：对形容词列表进行批量处理，计算肯定词（"是"、"是的"、"对"等）的概率得分
+3. **概念向量**：将所有形容词的肯定概率组合成高维向量，形状为 `[形容词数量]`
 
-### 3. 词典资源
+### 3. MLP模型架构
 
-- **毒性词典**：包含 general、LGBT、racism、region、sexism 五类脏词
-- **攻击立场词典**：包含 region、race、gender、LGBT、political、other 六类攻击立场模式
+```
+输入: 形容词概念向量 [V]
+    ↓
+[门控层] ← 学习每个形容词特征的重要性权重 (sigmoid激活)
+    ↓
+[Dropout] ← 正则化，防止过拟合
+    ↓
+[隐藏层] V → 96 (ReLU激活 + Dropout)
+    ↓
+[输出层] 96 → 2 (有毒/无毒)
+```
+
+**门控机制**：
+- 通过 `gate_layer = Linear(V, V)` 学习特征重要性
+- 使用 sigmoid 激活得到 0-1 范围的权重
+- 元素级乘法实现自适应特征选择
+
+### 4. 形容词词典
+
+项目包含245个精心筛选的形容词，涵盖：
+- **有害性形容词**：abusive（辱骂性的）、hateful（仇恨的）、discriminatory（歧视性的）等
+- **积极性形容词**：respectful（尊重的）、empathetic（共情的）、constructive（建设性的）等
+- **中性形容词**：critical（批评的）、challenging（挑战性的）、controversial（有争议的）等
+
+每个形容词配有中英文对照和详细定义说明。
 
 ## 环境要求
 
@@ -100,6 +76,11 @@ toxicn/
 Python >= 3.8
 PyTorch >= 2.0
 transformers >= 4.50
+modelscope >= 1.0
+scikit-learn >= 1.0
+matplotlib >= 3.5
+pandas >= 1.5
+bitsandbytes >= 0.40  # 用于4bit量化加载LLM
 ```
 
 ### 安装依赖
@@ -110,58 +91,97 @@ pip install -r requirements.txt
 
 ## 快速开始
 
-### 1. 配置数据集
+### 前置准备：生成形容词概念向量
 
-修改 `configs/base_config.py` 中的数据集路径：
+在使用MLP模型之前，需要先使用LLM生成形容词概念向量文件：
 
-```python
-self.dataset_name = "TOXICN"  # 或 "COLD"
+```bash
+# 生成训练集的概念向量
+python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct
+
+# 生成测试集的概念向量
+python scripts/generate_adjective_c_r.py --mode test --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct
 ```
 
-### 2. 训练 BERT+FNN 模型
+生成的概念向量文件将保存在 `data/processed/` 目录下，命名格式为：
+- `train_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json`
+- `test_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json`
 
-```python
-from utils.train import init, final_train
+> **注意**：生成概念向量需要GPU支持和较长时间（取决于数据集大小），请耐心等待。
 
-# 初始化配置
-base_config = init()
+### 训练+测试一体化流程
 
-# 开始训练
-final_train(base_config)
+使用统一的MLP流水线脚本，支持训练完成后自动测试：
+
+```bash
+# 默认配置（TOXICN数据集，Qwen2.5-1.5B-Instruct）
+python utils/mlp_pipeline.py --mode all
+
+# 指定COLD数据集
+python utils/mlp_pipeline.py --mode all --dataset_name COLD
+
+# 自定义超参数
+python utils/mlp_pipeline.py --mode all \
+    --dataset_name TOXICN \
+    --batch_size 32 \
+    --epochs 100 \
+    --max_lr 5e-4 \
+    --dropout_rate 0.4 \
+    --hidden_features 128 \
+    --seed 42
+
+# 启用确定性模式（确保可复现）
+python utils/mlp_pipeline.py --mode all --use_deterministic --seed 42
 ```
 
 训练结果将保存在 `experiments/{timestamp}/` 目录下，包含：
+- `config.json`：实验配置快照
 - `best_model.pth`：最佳模型权重
-- `config.json`：训练配置
-- `metrics.png`：训练指标可视化
+- `metrics.png`：训练曲线可视化
+- `test_results/`：测试结果目录
+  - `metrics.json`：评估指标
+  - `classification_report.txt`：详细分类报告
+  - `predictions.json`：逐条预测结果
 
-### 3. 测试 BERT+FNN 模型
+### 仅训练模式
 
-```python
-from utils.test import test
-from pathlib import Path
+```bash
+python utils/mlp_pipeline.py --mode train --dataset_name TOXICN
+```
 
-# 指定实验目录
-experiment_dir = Path("experiments/20260411-161544")
-test(experiment_dir)
+### 仅测试模式
+
+```bash
+# 必须指定实验时间戳
+python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
 ```
 
 ## 配置说明
 
-### BaseConfig 主要参数
+### MLPConfig 主要参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `dataset_name` | 数据集名称 | "TOXICN" |
-| `bert_path` | BERT 模型路径 | "models/bert-base-chinese" |
-| `batch_size` | 批次大小 | 64 |
-| `epochs` | 训练轮数 | 8 |
-| `lr` | 学习率 | 1e-5 |
-| `max_len` | 最大序列长度 | 80 |
-| `dropout_rate` | Dropout 比率 | 0.5 |
-| `freeze_bert_layers` | 冻结 BERT 层数 | 0 |
-| `num_toxic_types` | 毒性类别数 | 6 |
-| `use_deterministic` | 启用确定性模式 | True |
+| `model_name` | LLM模型名称 | "Qwen2.5-1.5B-Instruct" |
+| `batch_size` | 批次大小 | 16 |
+| `epochs` | 训练轮数 | 200 |
+| `max_lr` | 峰值学习率 | 1e-3 |
+| `pct_start` | Warmup比例 | 0.2 |
+| `div_factor` | 初始学习率除数 | 25.0 |
+| `final_div_factor` | 最终学习率除数 | 10000.0 |
+| `anneal_strategy` | 衰减策略 | "cos" |
+| `dropout_rate` | Dropout比率 | 0.3 |
+| `hidden_features` | 隐藏层维度 | 96 |
+| `seed` | 随机种子 | 1 |
+| `use_deterministic` | 启用确定性模式 | False |
+
+### 命令行参数优先级
+
+- **训练模式**：命令行参数 > MLP_config.py（命令行覆盖配置文件）
+- **测试模式**：强制使用实验目录的 config.json（忽略命令行超参数）
+
+这种设计确保了测试时使用与训练完全一致的配置，避免配置不一致导致的错误。
 
 ## 实验管理
 
@@ -169,27 +189,42 @@ test(experiment_dir)
 
 ```
 experiments/
-├── 20260410-164833/
-│   ├── best_model.pth      # 模型权重
-│   ├── config.json         # 实验配置
-│   └── metrics.png         # 训练曲线
-├── 20260411-161544/
-│   ├── best_model.pth
+├── 20260415-085433/
+│   ├── config.json              # 实验配置快照
+│   ├── best_model.pth           # 最佳模型权重
+│   ├── metrics.png              # 训练曲线图
+│   └── test_results/            # 测试结果目录
+│       ├── metrics.json         # 评估指标
+│       ├── classification_report.txt  # 分类报告
+│       └── predictions.json     # 逐条预测结果
+├── 20260416-100921/
 │   ├── config.json
+│   ├── best_model.pth
 │   ├── metrics.png
-│   └── test_results/       # 测试结果
-│       └── test_metrics.json
+│   └── test_results/
+│       └── ...
 └── ...
 ```
+
+### 多种子实验
+
+项目支持多种子敏感性分析，位于 `scripts/seed_experiment_results/` 目录：
+
+```bash
+# 运行多种子实验
+python scripts/seed_experiment_results/seed_experiment.py
+```
+
+该脚本会使用不同的随机种子（1, 42, 123, 2024, 7777）重复训练，并汇总统计结果。
 
 ## 数据集
 
 本项目支持以下中文有害言论数据集：
 
-- **TOXICN**：中文毒性言论数据集
-- **COLD**：中文冒犯性语言数据集
+- **TOXICN**：中文毒性言论数据集，包含约2.9MB训练数据和730KB测试数据
+- **COLD**：中文冒犯性语言数据集，包含约8.2MB训练数据和1.4MB测试数据
 
-数据格式：
+数据格式（原始数据）：
 ```json
 [
   {
@@ -201,45 +236,56 @@ experiments/
 ]
 ```
 
+数据格式（概念向量）：
+```json
+[
+  {
+    "content": "文本内容",
+    "concept": [0.85, 0.12, 0.93, ..., 0.45]  // 245维形容词概念向量
+  }
+]
+```
+
 ## 模型评估
 
 评估指标包括：
-- **精确率（Precision）**
-- **召回率（Recall）**
-- **F1 分数（F1 Score）**
-- **准确率（Accuracy）**
+- **精确率（Precision）**：查准率，预测为有毒的样本中真正有毒的比例
+- **召回率（Recall）**：查全率，真正有毒的样本中被正确预测的比例
+- **F1 分数（F1 Score）**：精确率和召回率的调和平均数
+- **准确率（Accuracy）**：所有样本中预测正确的比例
 
-## MLP 任务（独立运行）
+所有指标均采用 **Macro Average**（宏平均）计算，平等对待每个类别。
 
-基于形容词概念向量的 MLP 分类器（带门控机制），与 BERT+FNN 任务独立：
-
-### 训练 MLP 模型
-
-```python
-from utils.mlp_train import init, load_data, train
-
-mlp_config = init()
-train_data = load_data(mlp_config, "train_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json")
-test_data = load_data(mlp_config, "test_with_concepts(TOXICN)(Qwen2.5-1.5B-Instruct).json")
-train(mlp_config, train_data, test_data)
-```
-
-### 测试 MLP 模型
-
-```python
-from utils.mlp_test import evaluate_best_model
-
-evaluate_best_model("20260410-164833")
-```
+## 高级用法
 
 ### 数据分析
 
 ```python
 from scripts.analyze_dataset import analyze_toxic_dataset
-from utils.data_preprocess import ToxicDataset
+import json
+
+# 加载数据集
+with open('data/raw/TOXICN/train.json', 'r', encoding='utf-8') as f:
+    dataset = json.load(f)
 
 # 分析数据集统计信息
 analyze_toxic_dataset(dataset, "train")
+```
+
+### 自定义形容词词典
+
+如需扩展形容词列表，可以编辑 `data/raw/adjective/toxic_adjectives.csv` 文件，添加新的形容词及其定义。重新生成概念向量后，MLP模型的输入维度会自动适配。
+
+### 更换LLM模型
+
+项目支持Qwen2.5系列不同规模的模型：
+- `Qwen2.5-1.5B-Instruct`：轻量级，适合快速实验
+- `Qwen2.5-3B-Instruct`：中等规模，平衡性能和速度
+- `Qwen2.5-7B-Instruct`：大规模，可能获得更好的概念表示质量
+
+```bash
+python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct
+python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct
 ```
 
 ## 引用
@@ -248,7 +294,7 @@ analyze_toxic_dataset(dataset, "train")
 
 ```
 @software{toxicn,
-  title = {toxicn: BERT+FNN中文有害言论检测系统},
+  title = {toxicn: 基于形容词概念向量的中文有害言论检测系统},
   year = {2026}
 }
 ```

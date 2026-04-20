@@ -1,4 +1,15 @@
-"""生成形容词概念向量（基于肯定词概率和）。"""
+"""生成形容词概念向量（基于肯定词概率和）
+
+使用示例：
+python scripts/generate_adjective_c_r.py
+--mode
+train
+--dataset_name
+TOXICN
+--model_name
+Qwen2.5-1.5B-Instruct
+
+"""
 import argparse
 import sys
 from pathlib import Path

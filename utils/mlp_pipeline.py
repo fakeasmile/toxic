@@ -14,19 +14,19 @@
     python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
 
     # 4. 自定义数据集和超参数（完整命令）
-    python utils/mlp_pipeline.py --mode all \\
-        --dataset_name COLD \\
-        --model_name Qwen2.5-1.5B-Instruct \\
-        --batch_size 32 \\
-        --epochs 100 \\
-        --max_lr 5e-4 \\
-        --pct_start 0.2 \\
-        --div_factor 25 \\
-        --final_div_factor 10000 \\
-        --anneal_strategy cos \\
-        --dropout_rate 0.4 \\
-        --hidden_features 128 \\
-        --use_deterministic \\
+    python utils/mlp_pipeline.py --mode all
+        --dataset_name COLD
+        --model_name Qwen2.5-1.5B-Instruct
+        --batch_size 32
+        --epochs 100
+        --max_lr 5e-4
+        --pct_start 0.2
+        --div_factor 25
+        --final_div_factor 10000
+        --anneal_strategy cos
+        --dropout_rate 0.4
+        --hidden_features 128
+        --use_deterministic
         --seed 42
     
     # 5. 启用确定性模式 (确保实验可复现)
