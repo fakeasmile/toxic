@@ -49,4 +49,17 @@ var/
 wheels/
 *.whl
 develop-eggs/
+
+# IDE
+.idea/
+.vscode/
+
+# Models (large files)
+models/bert-base-chinese/
+models/Qwen2.5-*/
+
+# Data & Experiments
+data/
+experiments/
+experiments_bert/
 ```
