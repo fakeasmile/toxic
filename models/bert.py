@@ -134,9 +134,9 @@ class ModifiedBert(nn.Module):
         return pooler_output
 
 
-class Pure_Bert(nn.Module):
+class PureBert(nn.Module):
     def __init__(self, bert_path, freeze_layers=12):
-        super(Pure_Bert, self).__init__()
+        super(PureBert, self).__init__()
         self.virgin_bert = BertModel.from_pretrained(bert_path)
         self.freeze_bert_layers(freeze_layers)
 
@@ -164,11 +164,3 @@ class Pure_Bert(nn.Module):
         for param in self.virgin_bert.pooler.parameters():
             param.requires_grad = True
 
-    def forward(self, input_ids, attention_mask, token_type_ids=None, toxic_ids=None):
-
-        outputs = self.virgin_bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-        )
-        return outputs.pooler_output

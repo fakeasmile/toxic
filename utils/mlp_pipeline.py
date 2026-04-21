@@ -666,6 +666,8 @@ def load_dynamic_config(args):
     print(f"模型名称: {updated_config.model_name}")
     print(f"训练集路径: {updated_config.train_path}")
     print(f"测试集路径: {updated_config.test_path}")
+    print(f"形容词概念向量训练集路径: {updated_config.train_concept_path}")
+    print(f"形容词概念向量测试集路径: {updated_config.test_concept_path}")
     print("\n--- 训练超参数 ---")
     print(f"批次大小 (batch_size): {updated_config.batch_size}")
     print(f"训练轮数 (epochs): {updated_config.epochs}")

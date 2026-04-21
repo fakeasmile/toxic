@@ -189,7 +189,7 @@ python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
 
 ```
 experiments/
-├── 20260415-085433/
+├── 20260420-115958/
 │   ├── config.json              # 实验配置快照
 │   ├── best_model.pth           # 最佳模型权重
 │   ├── metrics.png              # 训练曲线图
@@ -197,7 +197,7 @@ experiments/
 │       ├── metrics.json         # 评估指标
 │       ├── classification_report.txt  # 分类报告
 │       └── predictions.json     # 逐条预测结果
-├── 20260416-100921/
+├── 20260420-123802/
 │   ├── config.json
 │   ├── best_model.pth
 │   ├── metrics.png
@@ -205,17 +205,6 @@ experiments/
 │       └── ...
 └── ...
 ```
-
-### 多种子实验
-
-项目支持多种子敏感性分析，位于 `scripts/seed_experiment_results/` 目录：
-
-```bash
-# 运行多种子实验
-python scripts/seed_experiment_results/seed_experiment.py
-```
-
-该脚本会使用不同的随机种子（1, 42, 123, 2024, 7777）重复训练，并汇总统计结果。
 
 ## 数据集
 
@@ -257,20 +246,6 @@ python scripts/seed_experiment_results/seed_experiment.py
 所有指标均采用 **Macro Average**（宏平均）计算，平等对待每个类别。
 
 ## 高级用法
-
-### 数据分析
-
-```python
-from scripts.analyze_dataset import analyze_toxic_dataset
-import json
-
-# 加载数据集
-with open('data/raw/TOXICN/train.json', 'r', encoding='utf-8') as f:
-    dataset = json.load(f)
-
-# 分析数据集统计信息
-analyze_toxic_dataset(dataset, "train")
-```
 
 ### 自定义形容词词典
 
