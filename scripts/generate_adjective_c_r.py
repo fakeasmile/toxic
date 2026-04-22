@@ -53,6 +53,14 @@ def parse_args():
         help='LLM模型名称'
     )
 
+    parser.add_argument(
+        '--template',
+        type=str,
+        choices=['binary', 'likert'],
+        default='binary',
+        help='提示词模板类型：binary=二元判断(原始), likert=Likert程度量化'
+    )
+
     return parser.parse_args()
 
 def update_MLPConfig(args):
@@ -69,7 +77,7 @@ def update_MLPConfig(args):
         mlp_config.model_name = args.model_name
 
     # 第二步：重新计算所有依赖 dataset_name 和 model_name 的路径
-    # 确保路径与最新的数据集/模型名称一致
+    # 确保原数据集路径和形容词概念向量输出路径正确
     mlp_config.train_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "train.json"
     mlp_config.test_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "test.json"
     mlp_config.train_concept_path = mlp_config.processed_path / f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
@@ -160,17 +168,20 @@ def _expand_prefix_cache(base_cache, batch_size: int):
     return tuple(expanded_layers)
 
 
-def generate_adj_concept(mlp_config, mode):
+def generate_adj_concept(mlp_config, mode, template="binary"):
     # 加载LLM和分词器
     tokenizer, model = load_qwen_model(mlp_config.models_path, mlp_config.model_name)
     device = next(model.parameters()).device
 
-    # 定义肯定词/否定词列表
-    affirmative_tokens = ["是", "是的", "对", "准确", "正确", "Yes", "yes"]
-    negative_tokens = ["否", "不", "错误", "偏差", "No", "no"]
-    # 获取肯定词/否定词token id
-    affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
-    negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
+    # 根据模板类型定义verbalizer token
+    if template == "binary":
+        affirmative_tokens = ["是", "是的", "对", "准确", "正确", "Yes", "yes"]
+        negative_tokens = ["否", "不", "错误", "偏差", "No", "no"]
+        affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
+        negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
+    elif template == "likert":
+        likert_tokens = {1: ["1", "一"], 2: ["2", "二"], 3: ["3", "三"], 4: ["4", "四"], 5: ["5", "五"]}
+        likert_ids = {k: get_first_token_ids(v, tokenizer, device) for k, v in likert_tokens.items()}
 
     # 读取形容词列表，提取中文列
     adjectives = pd.read_csv(mlp_config.adjective_path)["chinese"].tolist()
@@ -187,11 +198,25 @@ def generate_adj_concept(mlp_config, mode):
     else:
         raise ValueError("dataset_name must be 'train' or 'test'")
 
+    # 非binary模板时，输出路径加入模板名以避免覆盖
+    if template != "binary":
+        output_concept_path = mlp_config.processed_path / f"{mode}_with_concepts({mlp_config.dataset_name})({mlp_config.model_name})({template}).json"
+
     results = []
     batch_size = 16  # 形容词批量推理大小
 
-    # “公共前缀缓存 + 变动后缀批量推理”
-    instruction = "你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答‘是’或‘否’。"
+    # "公共前缀缓存 + 变动后缀批量推理"
+    # 根据模板类型定义指令
+    if template == "binary":
+        instruction = "你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答'是'或'否'。"
+    elif template == "likert":
+        instruction = ("你是一位专业的文本特征分析专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
+                       "请严格按照1到5的等级进行评估：\n"
+                       "1 = 完全不具有该特征\n"
+                       "2 = 略微具有该特征\n"
+                       "3 = 中等程度具有该特征\n"
+                       "4 = 较强程度具有该特征\n"
+                       "5 = 非常强烈地具有该特征")
 
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
         content = sample["content"]  # 文本内容
@@ -215,7 +240,10 @@ def generate_adj_concept(mlp_config, mode):
             # 后缀token
             suffix_texts = []
             for adj in adj_batch:
-                suffix_texts.append(f"形容词：‘{adj}’描述是否准确？回答：")
+                if template == "binary":
+                    suffix_texts.append(f"形容词：'{adj}'描述是否准确？回答：")
+                elif template == "likert":
+                    suffix_texts.append(f"形容词「{adj}」的程度等级：")
             suffix_inputs = tokenizer(
                 suffix_texts,
                 return_tensors="pt",
@@ -279,10 +307,15 @@ def generate_adj_concept(mlp_config, mode):
                 # softmax 前转 float32，避免半精度下极小概率数值不稳定
                 probs = torch.softmax(target_logits.float(), dim=-1)  # 和为1
 
-                pos_prob = probs[affirmative_ids].sum()  # 计算肯定词的概率和
-                neg_prob = probs[negative_ids].sum()  # 计算否定词的概率和
-                total = pos_prob + neg_prob + 1e-8
-                score = (pos_prob / total).item()
+                if template == "binary":
+                    pos_prob = probs[affirmative_ids].sum()  # 计算肯定词的概率和
+                    neg_prob = probs[negative_ids].sum()  # 计算否定词的概率和
+                    total = pos_prob + neg_prob + 1e-8
+                    score = (pos_prob / total).item()
+                elif template == "likert":
+                    weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], device=device)
+                    level_probs = torch.stack([probs[likert_ids[k]].sum() for k in range(1, 6)])
+                    score = (weights * level_probs).sum().item()
 
                 concept_vector.append(score)
 
@@ -306,8 +339,8 @@ def generate_adj_concept(mlp_config, mode):
 def main():
     args = parse_args()  # 解析命令行参数
 
-    config = update_MLPConfig(args)
-    generate_adj_concept(config, args.mode)
+    config = update_MLPConfig(args)  # 更新MLP配置
+    generate_adj_concept(config, args.mode, args.template)
 
 
 if __name__ == '__main__':
