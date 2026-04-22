@@ -80,8 +80,11 @@ def update_MLPConfig(args):
     # 确保原数据集路径和形容词概念向量输出路径正确
     mlp_config.train_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "train.json"
     mlp_config.test_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "test.json"
-    mlp_config.train_concept_path = mlp_config.processed_path / f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
-    mlp_config.test_concept_path = mlp_config.processed_path / f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
+
+    # 根据模板类型确定概念向量输出路径
+    template_suffix = f"({args.template})" if args.template != "binary" else ""
+    mlp_config.train_concept_path = mlp_config.processed_path / f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}){template_suffix}.json"
+    mlp_config.test_concept_path = mlp_config.processed_path / f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}){template_suffix}.json"
     
     # 打印实际使用的配置，便于调试和验证
     print("\n" + "=" * 60)
@@ -91,6 +94,8 @@ def update_MLPConfig(args):
     print(f"LLM模型名称: {mlp_config.model_name}")
     print(f"形容词词典路径: {mlp_config.adjective_path}")
     print(f"当前模式: {args.mode}")
+    print(f"提示词模板: {args.template}")
+    print(f"输出路径: {mlp_config.train_concept_path if args.mode == 'train' else mlp_config.test_concept_path}")
     print("=" * 60 + "\n")
 
     return mlp_config
@@ -168,12 +173,10 @@ def _expand_prefix_cache(base_cache, batch_size: int):
     return tuple(expanded_layers)
 
 
-def generate_adj_concept(mlp_config, mode, template="binary"):
-    # 加载LLM和分词器
-    tokenizer, model = load_qwen_model(mlp_config.models_path, mlp_config.model_name)
+def generate_adj_concept(mlp_config, mode, template, tokenizer, model):
     device = next(model.parameters()).device
 
-    # 根据模板类型定义verbalizer token
+    # 根据模板类型定义verbalizer token（首token id集合）
     if template == "binary":
         affirmative_tokens = ["是", "是的", "对", "准确", "正确", "Yes", "yes"]
         negative_tokens = ["否", "不", "错误", "偏差", "No", "no"]
@@ -181,16 +184,18 @@ def generate_adj_concept(mlp_config, mode, template="binary"):
         negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
     elif template == "likert":
         likert_tokens = {1: ["1", "一"], 2: ["2", "二"], 3: ["3", "三"], 4: ["4", "四"], 5: ["5", "五"]}
-        likert_ids = {k: get_first_token_ids(v, tokenizer, device) for k, v in likert_tokens.items()}
+        likert_ids = {}
+        for level in range(1, 6):
+            likert_ids[level] = get_first_token_ids(likert_tokens[level], tokenizer, device)
 
-    # 读取形容词列表，提取中文列
+    # 加载形容词词典
     adjectives = pd.read_csv(mlp_config.adjective_path)["chinese"].tolist()
 
-    # 读取数据集
+    # 根据模式选择数据集和输出路径
     if mode == "train":
         with open(mlp_config.train_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
-        output_concept_path = mlp_config.train_concept_path  # 形容词概念向量保存路径
+        output_concept_path = mlp_config.train_concept_path
     elif mode == "test":
         with open(mlp_config.test_path, "r", encoding="utf-8") as f:
             data_set = json.load(f)
@@ -198,15 +203,7 @@ def generate_adj_concept(mlp_config, mode, template="binary"):
     else:
         raise ValueError("dataset_name must be 'train' or 'test'")
 
-    # 非binary模板时，输出路径加入模板名以避免覆盖
-    if template != "binary":
-        output_concept_path = mlp_config.processed_path / f"{mode}_with_concepts({mlp_config.dataset_name})({mlp_config.model_name})({template}).json"
-
-    results = []
-    batch_size = 16  # 形容词批量推理大小
-
-    # "公共前缀缓存 + 变动后缀批量推理"
-    # 根据模板类型定义指令
+    # 根据模板类型构建提示词指令
     if template == "binary":
         instruction = "你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答'是'或'否'。"
     elif template == "likert":
@@ -218,26 +215,28 @@ def generate_adj_concept(mlp_config, mode, template="binary"):
                        "4 = 较强程度具有该特征\n"
                        "5 = 非常强烈地具有该特征")
 
-    for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
-        content = sample["content"]  # 文本内容
-        concept_vector = []  # 存储这条文本对应的形容词概念向量，形状：[V]
+    results = []
+    batch_size = 16  # 形容词批量推理大小
 
-        # 指令+文本内容作为公共前缀
+    for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
+        content = sample["content"]
+        concept_vector = []
+
+        # 构建公共前缀（指令+文本内容），计算KV缓存
         prefix_text = f"{instruction}\n文本内容：{content}\n"
-        # tokenizer分词，input_ids形状[1, L_prefix]，attention_mask：[1, L_prefix]，全1
         prefix_inputs = tokenizer(prefix_text, return_tensors="pt", add_special_tokens=True).to(device)
 
-        # 计算前缀的KV缓存
         with torch.no_grad():
             prefix_outputs = model(**prefix_inputs, use_cache=True)
-            base_cache = prefix_outputs.past_key_values  # k,v形状：[1, num_heads, L_prefix, head_dim]
-            prefix_len = prefix_inputs["input_ids"].shape[1]  # 获取前缀token的长度
+            base_cache = prefix_outputs.past_key_values
+            prefix_len = prefix_inputs["input_ids"].shape[1]
 
+        # 按批次遍历形容词，复用前缀KV缓存
         for i in range(0, len(adjectives), batch_size):
-            adj_batch = adjectives[i: i + batch_size]  # 批量大小的形容词（最后一组可能不足）
-            curr_bsz = len(adj_batch)  # 当前形容词数量
+            adj_batch = adjectives[i: i + batch_size]
+            curr_bsz = len(adj_batch)
 
-            # 后缀token
+            # 构建当前模板的后缀
             suffix_texts = []
             for adj in adj_batch:
                 if template == "binary":
@@ -247,69 +246,44 @@ def generate_adj_concept(mlp_config, mode, template="binary"):
             suffix_inputs = tokenizer(
                 suffix_texts,
                 return_tensors="pt",
-                padding=True,  # 填充到批次内最大长度
+                padding=True,
                 add_special_tokens=False,
             ).to(device)
-            # suffix_inputs结构：
-            # - input_ids: 形状[curr_bsz, L_suffix]（L_suffix=后缀最长Token数）
-            # - attention_mask: 形状[curr_bsz, L_suffix]（1=有效Token，0=填充）
+            suffix_len = suffix_inputs["input_ids"].shape[1]
 
-            suffix_len = suffix_inputs["input_ids"].shape[1]  # 后缀长度L_suffix
-
-            # 构建position_ids
-            # 生成递增序列[L_prefix, L_prefix+1,...,L_prefix+L_suffix-1]，形状：[L_suffix]
+            # position_ids：后缀token的位置从prefix_len开始递增
             position_ids = torch.arange(prefix_len, prefix_len + suffix_len, device=device).unsqueeze(0)
-            position_ids = position_ids.expand(curr_bsz, -1).contiguous()  # 扩展为[curr_bsz, L_suffix]
+            position_ids = position_ids.expand(curr_bsz, -1).contiguous()
 
-            # 扩展前缀缓存到当前batch大小
+            # 扩展前缀缓存到当前batch大小，拼接完整attention_mask
             expanded_cache = _expand_prefix_cache(base_cache, curr_bsz)
-
-            # 构建完整的attention_mask，前缀掩码全1，形状[curr_bsz, L_prefix]
             prefix_mask = torch.ones(
                 (curr_bsz, prefix_len),
                 device=device,
                 dtype=suffix_inputs["attention_mask"].dtype,
             )
-            # 形状：[curr_bsz, L_prefix + L_suffix]
             full_mask = torch.cat([prefix_mask, suffix_inputs["attention_mask"]], dim=1)
 
-            # 此时构建好前缀kv缓存，完整的注意力掩码和位置编码
-            '''
-            attention_mask:
-            --prefix--    --suffix--
-            1,1,1,1,1,1,,..,1,1,1,0
-            1,1,1,1,1,1,...,1,0,0,0
-            1,1,1,1,1,1,...,1,1,1,1
-            position_ids:
-            --suffix--
-            L_p, L_p+1, L_p+2, ..., L_p+i, L_p+i
-            L_p, L_p+1, L_p+2, ..., L_p+j, L_p+j
-            L_p, L_p+1, L_p+2, ..., L_p+k, L_p+k
-            ...
-            '''
             with torch.no_grad():
                 outputs = model(
-                    input_ids=suffix_inputs["input_ids"],  # input_ids:[curr_bsz, L_suffix]
-                    attention_mask=full_mask,              # [curr_bsz, L_prefix+L_suffix]
-                    position_ids=position_ids,             # [curr_bsz, L_suffix]
-                    past_key_values=expanded_cache,        # 前缀缓存
+                    input_ids=suffix_inputs["input_ids"],
+                    attention_mask=full_mask,
+                    position_ids=position_ids,
+                    past_key_values=expanded_cache,
                     use_cache=False,
                 )
 
-            logits = outputs.logits  # 形状：[curr_bsz, L_suffix, vocab_size]
-            # 根据最后一个token位置获取生成的第一个token的概率分布
-            last_token_indices = suffix_inputs["attention_mask"].sum(dim=1) - 1  # 分词器为right右填充，形状[curr_bsz]
+            logits = outputs.logits
+            last_token_indices = suffix_inputs["attention_mask"].sum(dim=1) - 1
 
+            # 对每个形容词，根据模板类型提取概率并打分
             for j, last_idx in enumerate(last_token_indices):
-                # last_idx表示这个批次中第j个样本的有效token长度-1
-                target_logits = logits[j, last_idx, :]  # 形状[V]，表示最后一个有效token的为归一化分数
-
-                # softmax 前转 float32，避免半精度下极小概率数值不稳定
-                probs = torch.softmax(target_logits.float(), dim=-1)  # 和为1
+                target_logits = logits[j, last_idx, :]
+                probs = torch.softmax(target_logits.float(), dim=-1)
 
                 if template == "binary":
-                    pos_prob = probs[affirmative_ids].sum()  # 计算肯定词的概率和
-                    neg_prob = probs[negative_ids].sum()  # 计算否定词的概率和
+                    pos_prob = probs[affirmative_ids].sum()
+                    neg_prob = probs[negative_ids].sum()
                     total = pos_prob + neg_prob + 1e-8
                     score = (pos_prob / total).item()
                 elif template == "likert":
@@ -340,7 +314,10 @@ def main():
     args = parse_args()  # 解析命令行参数
 
     config = update_MLPConfig(args)  # 更新MLP配置
-    generate_adj_concept(config, args.mode, args.template)
+
+    tokenizer, model = load_qwen_model(config.models_path, config.model_name)  # 加载LLM和分词器
+
+    generate_adj_concept(config, args.mode, args.template, tokenizer, model)  # 生成形容词概念向量
 
 
 if __name__ == '__main__':
