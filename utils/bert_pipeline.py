@@ -28,7 +28,7 @@
     python utils/bert_pipeline.py --mode test --timestamp 20260421-120000
 
     # 4. 自定义完整超参数
-    python utils/bert_pipeline.py --mode all --dataset_name COLD --seed 42 --use_deterministic --batch_size 32 --epochs 3 --max_seq_length 256 --patience 3
+    python utils/bert_pipeline.py --mode all --dataset_name COLD --seed 1 --use_deterministic --batch_size 16 --epochs 5 --max_seq_length 128 --patience 2
 
 命令行参数说明:
     运行模式:
@@ -182,8 +182,8 @@ def load_raw_data(config, mode):
     path = config.train_path if mode == "train" else config.test_path
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    texts = [item["content"] for item in data]
-    labels = [item["toxic"] for item in data]
+    texts = [item["content"] for item in data if isinstance(item["content"], str)]
+    labels = [item["toxic"] for item in data if isinstance(item["content"], str)]
     return texts, labels
 
 
