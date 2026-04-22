@@ -1,13 +1,7 @@
 """生成形容词概念向量（基于肯定词概率和）
 
 使用示例：
-python scripts/generate_adjective_c_r.py
---mode
-train
---dataset_name
-TOXICN
---model_name
-Qwen2.5-1.5B-Instruct
+python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct
 
 """
 import argparse
@@ -61,7 +55,7 @@ def parse_args():
 
     return parser.parse_args()
 
-def dynamic_load_parameters(args):
+def update_MLPConfig(args):
     """用命令行参数覆盖MLP_config参数
     
     注意：必须先更新 dataset_name 和 model_name，再更新依赖它们的路径
@@ -312,8 +306,8 @@ def generate_adj_concept(mlp_config, mode):
 def main():
     args = parse_args()  # 解析命令行参数
 
-    mlp_config = dynamic_load_parameters(args)
-    generate_adj_concept(mlp_config, args.mode)
+    config = update_MLPConfig(args)
+    generate_adj_concept(config, args.mode)
 
 
 if __name__ == '__main__':
