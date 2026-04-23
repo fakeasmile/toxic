@@ -17,6 +17,7 @@
     python utils/mlp_pipeline.py --mode all
         --dataset_name COLD
         --model_name Qwen2.5-1.5B-Instruct
+        --template binary
         --batch_size 32
         --epochs 100
         --max_lr 5e-4
@@ -29,6 +30,8 @@
         --patience 20
         --use_deterministic
         --seed 42
+    一般情况下：
+    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --epochs 500 --use_deterministic
     
     # 5. 启用确定性模式 (确保实验可复现)
     python utils/mlp_pipeline.py --mode all --use_deterministic --seed 42
@@ -41,6 +44,7 @@
     数据集配置:
         --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
         --model_name        LLM模型名称 (默认: Qwen2.5-1.5B-Instruct)
+        --template          提示词模板类型 (binary/likert, 默认: binary)
     
     随机种子:
         --seed              随机种子 (默认: 1)
@@ -145,8 +149,10 @@ def parse_args():
     )
 
     # 数据集配置
-    parser.add_argument('--dataset_name', type=str, default=None, help='数据集名称 (TOXICN/COLD)')
-    parser.add_argument('--model_name', type=str, default=None, help='LLM模型名称')
+    parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
+    parser.add_argument('--model_name', type=str, default='Qwen2.5-1.5B-Instruct', help='LLM模型名称')
+    parser.add_argument('--template', type=str, choices=['binary', 'likert'], default='binary',
+                        help='提示词模板类型：binary=二元判断, likert=Likert程度量化')
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')
@@ -176,18 +182,16 @@ def update_MLPConfig(args):
     """
     mlp_config = MLPConfig()  # MLP_config.py中的配置对象
 
-    # 用命令行参数更新配置对象
-    if args.dataset_name is not None:
-        mlp_config.dataset_name = args.dataset_name
+    # 数据集与模板配置
+    mlp_config.dataset_name = args.dataset_name
+    mlp_config.model_name = args.model_name
+    mlp_config.template = args.template
 
-    if args.model_name is not None:
-        # 更新LLM模型
-        mlp_config.model_name = args.model_name
-
-    mlp_config.train_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "train.json"
-    mlp_config.test_path = mlp_config.base_path / "data" / "raw" / mlp_config.dataset_name / "test.json"
-    mlp_config.train_concept_path = mlp_config.processed_path / f"train_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
-    mlp_config.test_concept_path = mlp_config.processed_path / f"test_with_concepts({mlp_config.dataset_name})({mlp_config.model_name}).json"
+    # 动态生成依赖 dataset_name/model_name/template 的路径
+    mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                     / mlp_config.model_name / mlp_config.template / "concept_train.json")
+    mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                    / mlp_config.model_name / mlp_config.template / "concept_test.json")
 
     # 随机种子
     if args.seed is not None:
@@ -227,6 +231,8 @@ def update_MLPConfig(args):
 def load_data(config, mode):
     """加载指定训练或测试的概念向量和标签。
 
+    概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
+
     Args:
         config: 配置文件
         mode: train/test，区分加载训练或实验数据集
@@ -237,38 +243,19 @@ def load_data(config, mode):
 
     if mode == "train":
         concept_path = config.train_concept_path
-        raw_data_path = config.train_path
-
     elif mode == "test":
         concept_path = config.test_concept_path
-        raw_data_path = config.test_path
     else:
         raise ValueError("in load_data, mode must be 'train' or 'test'")
 
-    # 加载概念向量文件
+    # 加载概念向量文件（已包含 content, toxic, concept 字段）
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
-    # 加载原始数据集
-    with open(raw_data_path, "r", encoding="utf-8") as f:
-        raw_data = json.load(f)
-
     concepts, labels = [], []
-    if len(raw_data) != len(raw_concept_data):
-        raise ValueError(
-            f"数据长度不匹配:\n"
-            f"  原始数据 ({mode}): {len(raw_data)} 条\n"
-            f"  概念向量 ({mode}): {len(raw_concept_data)} 条\n"
-            f"  文件路径:\n"
-            f"    原始数据: {raw_data_path}\n"
-            f"    概念向量: {concept_path}\n"
-            f"  请重新运行 scripts/generate_adjective_c_r.py 生成概念向量"
-        )
-
-    # 提取形容词概念向量和对应的标签
-    for i in range(0, len(raw_concept_data)):
-        concepts.append(raw_concept_data[i]["concept"])
-        labels.append(raw_data[i]["toxic"])
+    for item in raw_concept_data:
+        concepts.append(item["concept"])
+        labels.append(item["toxic"])
 
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
@@ -587,8 +574,7 @@ def main():
             "experiment_path": str(config.experiment_path),
             "dataset_name": config.dataset_name,
             "model_name": config.model_name,
-            "train_path": str(config.train_path),
-            "test_path": str(config.test_path),
+            "template": config.template,
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
             "processed_path": str(config.processed_path),

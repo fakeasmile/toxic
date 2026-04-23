@@ -1,9 +1,7 @@
 """生成形容词概念向量（基于肯定词概率和）
 
 使用示例：
-python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN 
---model_name Qwen2.5-1.5B-Instruct 
---template binary
+python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
 """
 import argparse
 import sys
@@ -198,7 +196,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                 if template == "binary":
                     suffix_texts.append(f"形容词：'{adj}'描述是否准确？回答：")
                 elif template == "likert":
-                    suffix_texts.append(f"形容词「{adj}」的程度等级：")
+                    suffix_texts.append(f"形容词「{adj}」的程度等级（仅回答数字）：")
             suffix_inputs = tokenizer(
                 suffix_texts,
                 return_tensors="pt",
