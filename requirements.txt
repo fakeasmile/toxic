@@ -1,9 +1,8 @@
-matplotlib==3.10.8
-modelscope==1.34.0
+matplotlib==3.10.9
 numpy==2.4.4
-optuna==4.6.0
 pandas==3.0.2
 scikit_learn==1.8.0
-torch==2.5.1
+scipy==1.17.1
+torch==2.5.1+cu121
 tqdm==4.67.3
 transformers==4.57.6
