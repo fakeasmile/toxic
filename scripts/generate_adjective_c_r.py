@@ -149,6 +149,11 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
         likert_ids = {}
         for level in range(1, 6):
             likert_ids[level] = get_first_token_ids(likert_tokens[level], tokenizer, device)
+    elif template == "ICL":
+        affirmative_tokens = ["是", "是的", "表现", "体现", "具有", "存在", "Yes", "yes"]
+        negative_tokens = ["否", "不", "没有", "未", "并非", "不存在", "No", "no"]
+        affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
+        negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
 
     # 加载形容词词典
     adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
@@ -168,6 +173,10 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                        "3 = 中等程度具有该特征\n"
                        "4 = 较强程度具有该特征\n"
                        "5 = 非常强烈地具有该特征")
+    elif template == "ICL":
+        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征。"
+        # 加载形容词解释
+        definition = pd.read_csv(adjective_path)["definition"].tolist()
 
     results = []
     batch_size = 16  # 形容词批量推理大小
@@ -191,13 +200,19 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
             adj_batch = adjectives[i: i + batch_size]
             curr_bsz = len(adj_batch)  # 当前批次大小
 
+            # ICL模板：同步获取当前批次的形容词定义
+            if template == "ICL":
+                def_batch = definition[i: i + batch_size]
+
             # 构建当前模板的后缀
             suffix_texts = []
-            for adj in adj_batch:
+            for index, adj in enumerate(adj_batch):
                 if template == "binary":
                     suffix_texts.append(f"形容词：'{adj}'描述是否准确？回答：")
                 elif template == "likert":
                     suffix_texts.append(f"形容词'{adj}'的程度等级（仅回答数字）：")
+                elif template == "ICL":
+                    suffix_texts.append(f"形容词'{adj}'的定义：{def_batch[index]}\n根据上述定义，该文本是否表现出该'{adj}'所描述的特征？回答：")
             suffix_inputs = tokenizer(
                 suffix_texts,
                 return_tensors="pt",
@@ -249,6 +264,12 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                     total_level_prob = level_probs.sum() + 1e-8
                     score = (weights * level_probs / total_level_prob).sum().item()
                     raw_probs.append([level_probs[k].item() for k in range(5)])
+                elif template == "ICL":
+                    pos_prob = probs[affirmative_ids].sum()
+                    neg_prob = probs[negative_ids].sum()
+                    total = pos_prob + neg_prob + 1e-8
+                    score = (pos_prob / total).item()
+                    raw_probs.append([pos_prob.item(), neg_prob.item()])
 
                 concept_vector.append(score)
 
