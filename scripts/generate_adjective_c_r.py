@@ -98,7 +98,7 @@ def load_qwen_model(model_path: Path, model_name: str):
 
 
 def get_first_token_ids(word_list, tokenizer, device):
-    """对词表中每个词，用分词器编码得到关于这个词的token id（可能某个词对应多个token id），只记录第一个token id（并且去重后返回）。"""
+    """获取词表中每个词的token id（如果词被编码为了多个token，只取第一个token id）"""
     token_ids = []
     for word in word_list:
         encoded = tokenizer.encode(word, add_special_tokens=False)
@@ -108,7 +108,7 @@ def get_first_token_ids(word_list, tokenizer, device):
     if not token_ids:
         raise ValueError("get_first_token_ids ERROR")
 
-    return torch.tensor(sorted(set(token_ids)), device=device, dtype=torch.long)
+    return torch.tensor(list(dict.fromkeys(token_ids)), device=device, dtype=torch.long)
 
 
 def _expand_prefix_cache(base_cache, batch_size: int):
@@ -138,22 +138,36 @@ def _expand_prefix_cache(base_cache, batch_size: int):
 def generate_adj_concept(data_path, output_path, adjective_path, mode, template, tokenizer, model):
     device = next(model.parameters()).device
 
-    # 根据模板类型定义verbalizer token（首token id集合）
+    # 根据模板类型定义verbalizer token（首token id集合）和提示词指令
     if template == "binary":
-        affirmative_tokens = ["是", "是的", "对", "准确", "正确", "Yes", "yes"]
-        negative_tokens = ["否", "不", "错误", "偏差", "No", "no"]
+        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", "yes"]
+        negative_tokens = ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"]
         affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
         negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
+
+        instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
+
     elif template == "likert":
-        likert_tokens = {1: ["1", "一"], 2: ["2", "二"], 3: ["3", "三"], 4: ["4", "四"], 5: ["5", "五"]}
-        likert_ids = {}
-        for level in range(1, 6):
-            likert_ids[level] = get_first_token_ids(likert_tokens[level], tokenizer, device)
+        likert_tokens = ["1", "2", "3", "4", "5"]
+        likert_ids = get_first_token_ids(likert_tokens, tokenizer, device)
+
+        instruction = ("你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
+                       "请严格按照1到5的等级进行评估：\n"
+                       "1 = 完全不具有该特征\n"
+                       "2 = 略微具有该特征\n"
+                       "3 = 中等程度具有该特征\n"
+                       "4 = 较强程度具有该特征\n"
+                       "5 = 非常强烈地具有该特征")
+
     elif template == "ICL":
-        affirmative_tokens = ["是", "是的", "表现", "体现", "具有", "存在", "Yes", "yes"]
-        negative_tokens = ["否", "不", "没有", "未", "并非", "不存在", "No", "no"]
+        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", "yes"]
+        negative_tokens = ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"]
         affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
         negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
+
+        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
+        # 加载形容词解释
+        definition = pd.read_csv(adjective_path)["definition"].tolist()
 
     # 加载形容词词典
     adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
@@ -161,22 +175,6 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
-
-    # 根据模板类型构建提示词指令
-    if template == "binary":
-        instruction = "你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答'是'或'否'。"
-    elif template == "likert":
-        instruction = ("你是一位专业的文本特征分析专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
-                       "请严格按照1到5的等级进行评估：\n"
-                       "1 = 完全不具有该特征\n"
-                       "2 = 略微具有该特征\n"
-                       "3 = 中等程度具有该特征\n"
-                       "4 = 较强程度具有该特征\n"
-                       "5 = 非常强烈地具有该特征")
-    elif template == "ICL":
-        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征。"
-        # 加载形容词解释
-        definition = pd.read_csv(adjective_path)["definition"].tolist()
 
     results = []
     batch_size = 16  # 形容词批量推理大小
@@ -208,11 +206,11 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
             suffix_texts = []
             for index, adj in enumerate(adj_batch):
                 if template == "binary":
-                    suffix_texts.append(f"形容词：'{adj}'描述是否准确？回答：")
+                    suffix_texts.append(f"形容词：「{adj}」描述是否准确？回答： ")
                 elif template == "likert":
-                    suffix_texts.append(f"形容词'{adj}'的程度等级（仅回答数字）：")
+                    suffix_texts.append(f"形容词「{adj}」的程度等级（直接回答数字）： ")
                 elif template == "ICL":
-                    suffix_texts.append(f"形容词'{adj}'的定义：{def_batch[index]}\n根据上述定义，该文本是否表现出该'{adj}'所描述的特征？回答：")
+                    suffix_texts.append(f"形容词「{adj}」的定义：{def_batch[index]}\n根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： ")
             suffix_inputs = tokenizer(
                 suffix_texts,
                 return_tensors="pt",
@@ -259,11 +257,10 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                     raw_probs.append([pos_prob.item(), neg_prob.item()])
                 elif template == "likert":
                     weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], device=device)
-                    # level_probs = [0.07, 0.11, 0.20, 0.26, 0.22]
-                    level_probs = torch.stack([probs[likert_ids[k]].sum() for k in range(1, 6)])
+                    level_probs = probs[likert_ids]
                     total_level_prob = level_probs.sum() + 1e-8
                     score = (weights * level_probs / total_level_prob).sum().item()
-                    raw_probs.append([level_probs[k].item() for k in range(5)])
+                    raw_probs.append(level_probs.tolist())
                 elif template == "ICL":
                     pos_prob = probs[affirmative_ids].sum()
                     neg_prob = probs[negative_ids].sum()

@@ -1,6 +1,7 @@
 """Qwen模型提示词模板分析工具
 
 主要功能：
+模拟 generate_adjective_c_r.py 的单样本推理流程，快速调试提示词和 Verbalizer，确认分数计算是否符合预期
 该脚本用于分析和调试不同提示词模板（binary / likert / ICL）在Qwen系列模型上的推理行为，
 帮助评估提示词模板的质量和合理性，为生成形容词概念向量提供调试支持。
 后续在论文中可以在末尾简短对提示词进行分析，以证明我们的工作量。
@@ -35,14 +36,14 @@ from configs.MLP_config import MLPConfig
 
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-1.5B-Instruct"  # models目录下的模型文件夹名
+MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 
 # 提示词模板类型，可选: "binary", "likert", "ICL"
-PROMPT_TEMPLATE = "binary"
+PROMPT_TEMPLATE = "ICL"
 
 # 文本内容和形容词（直接修改即可）
-TEXT_CONTENT = "中国男性配不上中国女性"
-ADJECTIVE = "攻击性的"
+TEXT_CONTENT = "中国男性根本就配不上中国女性"
+ADJECTIVE = "理智的"
 
 # ICL模板专用：形容词定义（仅ICL模板使用，不需要时可留空）
 ADJECTIVE_DEFINITION = "具有敌意、冒犯性或威胁性的言语特征"
@@ -95,41 +96,62 @@ def get_first_token_ids(word_list, tokenizer, device):
         raise ValueError("get_first_token_ids ERROR")
 
     token_ids = sorted(set(token_ids))
-    return torch.tensor(token_ids, dtype=torch.long, device=device)
+    return torch.tensor(list(dict.fromkeys(token_ids)), device=device, dtype=torch.long)
 
 
 def build_prompt_and_verbalizer(template, text_content, adjective, adj_definition=""):
     """
     根据模板类型构建完整的提示词和对应的Verbalizer词表。
     逻辑与 generate_adjective_c_r.py 中的模板构建保持一致。
+
+    返回:
+        prompt: 完整的提示词文本
+        verbalizer_words: 用于显示的verbalizer词列表
+        score_tokens: 用于分数计算的token分组字典
+            - binary/ICL: {"affirmative": [...], "negative": [...]}
+            - likert: {"likert": ["1", "2", "3", "4", "5"]}
     """
     if template == "binary":
-        instruction = "你是一个语义分析专家。请判断给定形容词是否准确描述文本，只回答'是'或'否'。"
-        prompt = f"{instruction}\n文本内容：{text_content}\n形容词：'{adjective}'描述是否准确？回答："
-        verbalizer_words = ["是", " 是", "是的", "对", "准确", "正确", "Yes", "yes",
-                            "否", " 否", "不", " 不", "错误", "偏差", "No", "no"]
+        instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
+        prompt = f"{instruction}\n文本内容：{text_content}\n形容词：「{adjective}」描述是否准确？回答： "
+        verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", "yes",
+                            "否", "不", " 不", "No", " No", "no", " no"]
+        score_tokens = {
+            "affirmative": ["是", " 是", "Yes", " Yes", "yes", "yes"],
+            "negative": ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"],
+        }
+
     elif template == "likert":
-        instruction = ("你是一位专业的文本特征分析专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
+        instruction = ("你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
                        "请严格按照1到5的等级进行评估：\n"
                        "1 = 完全不具有该特征\n"
                        "2 = 略微具有该特征\n"
                        "3 = 中等程度具有该特征\n"
                        "4 = 较强程度具有该特征\n"
                        "5 = 非常强烈地具有该特征")
-        prompt = f"{instruction}\n文本内容：{text_content}\n形容词「{adjective}」的程度等级（仅回答数字）："
-        verbalizer_words = ["1", "2", "3", "4", "5", "一", "二", "三", "四", "五"]
+        prompt = f"{instruction}\n文本内容：{text_content}\n形容词「{adjective}」的程度等级（直接回答数字）： "
+        verbalizer_words = ["1", "2", "3", "4", "5"]
+        score_tokens = {
+            "likert": ["1", "2", "3", "4", "5"],
+        }
+
     elif template == "ICL":
-        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征。"
+        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
         prompt = (f"{instruction}\n"
                   f"文本内容：{text_content}\n"
-                  f"形容词'{adjective}'的定义：{adj_definition}\n"
-                  f"根据上述定义，该文本是否表现出该'{adjective}'所描述的特征？回答：")
-        verbalizer_words = ["是", "是的", "表现", "体现", "具有", "存在", "Yes", "yes",
-                            "否", "不", "没有", "未", "并非", "不存在", "No", "no"]
+                  f"形容词「{adjective}」的定义：{adj_definition}\n"
+                  f"根据上述定义，该文本是否表现出该「{adjective}」所描述的特征？回答： ")
+        verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", "yes",
+                            "否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
+        score_tokens = {
+            "affirmative": ["是", " 是", "Yes", " Yes", "yes", "yes"],
+            "negative": ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"],
+        }
+
     else:
         raise ValueError(f"不支持的模板类型: {template}，可选: binary, likert, ICL")
 
-    return prompt, verbalizer_words
+    return prompt, verbalizer_words, score_tokens
 
 
 def main():
@@ -139,7 +161,7 @@ def main():
     device = next(model.parameters()).device
 
     # 根据模板构建提示词和Verbalizer
-    prompt, verbalizer_words = build_prompt_and_verbalizer(
+    prompt, verbalizer_words, score_tokens = build_prompt_and_verbalizer(
         PROMPT_TEMPLATE, TEXT_CONTENT, ADJECTIVE, ADJECTIVE_DEFINITION
     )
 
@@ -197,19 +219,53 @@ def main():
 
         print(f"\nVerbalizer分析 ({len(verbalizer_words)}个词 -> {len(verbalizer_ids)}个唯一token):")
         print(f"{'词':<10} {'Token ID':<10} {'概率':<12}")
-        verbalizer_probs = []
+        verbalizer_prob_list = []
         for word in verbalizer_words:
             encoded = tokenizer.encode(word, add_special_tokens=False)
             if encoded:
                 tid = encoded[0]
                 p = probs[tid].item()
-                verbalizer_probs.append((word, tid, p))
+                verbalizer_prob_list.append((word, tid, p))
                 print(f"{word:<10} {tid:<10} {p:<12.6f}")
 
         # verbalizer概率统计
-        total_vprob = sum(p for _, _, p in verbalizer_probs)
+        total_vprob = sum(p for _, _, p in verbalizer_prob_list)
         print(f"\nVerbalizer概率总和: {total_vprob:.6f}")
         print(f"Verbalizer占总概率比例: {total_vprob:.2%}")
+
+        # 分数计算（与generate_adjective_c_r.py保持一致）
+        print(f"\n{'=' * 60}")
+        print("概念向量分数计算")
+        print(f"{'=' * 60}")
+
+        if PROMPT_TEMPLATE == "binary" or PROMPT_TEMPLATE == "ICL":
+            affirmative_ids = get_first_token_ids(score_tokens["affirmative"], tokenizer, device)
+            negative_ids = get_first_token_ids(score_tokens["negative"], tokenizer, device)
+
+            pos_prob = probs[affirmative_ids].sum().item()
+            neg_prob = probs[negative_ids].sum().item()
+            total = pos_prob + neg_prob + 1e-8
+            score = pos_prob / total
+
+            print(f"肯定词概率: {pos_prob:.6f}")
+            print(f"否定词概率: {neg_prob:.6f}")
+            print(f"归一化后概念分数: {score:.6f}")
+
+        elif PROMPT_TEMPLATE == "likert":
+            likert_ids = get_first_token_ids(score_tokens["likert"], tokenizer, device)
+            weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], device=device)
+
+            level_probs = probs[likert_ids]
+            total_level_prob = level_probs.sum() + 1e-8
+            score = (weights * level_probs / total_level_prob).sum().item()
+
+            print(f"Level 1 (权重0.00): {level_probs[0].item():.6f}")
+            print(f"Level 2 (权重0.25): {level_probs[1].item():.6f}")
+            print(f"Level 3 (权重0.50): {level_probs[2].item():.6f}")
+            print(f"Level 4 (权重0.75): {level_probs[3].item():.6f}")
+            print(f"Level 5 (权重1.00): {level_probs[4].item():.6f}")
+            print(f"Likert概率总和: {total_level_prob.item():.6f}")
+            print(f"加权期望概念分数: {score:.6f}")
 
     print("=" * 60)
 

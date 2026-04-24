@@ -57,6 +57,11 @@ develop-eggs/
 # Models (large files)
 models/bert-base-chinese/
 models/Qwen2.5-*/
+models/Deepseek-*/
+.trae/
+.workbuddy/
+docs/
+scripts/encode_tokens_qwen.py
 
 # Data & Experiments
 data/

@@ -9,8 +9,8 @@
 6. 模型间一致性：两个模型概念向量的逐样本相关性（需指定两组路径）
 
 使用示例：
-python scripts/evaluate_concept_quality.py --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
-python scripts/evaluate_concept_quality.py --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert
+python scripts/evaluate_concept_quality.py --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --mode test
+python scripts/evaluate_concept_quality.py --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert --mode test
 python scripts/evaluate_concept_quality.py --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --compare_model_name Qwen2.5-3B-Instruct
 """
 import argparse
