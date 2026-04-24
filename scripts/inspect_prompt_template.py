@@ -43,10 +43,10 @@ PROMPT_TEMPLATE = "ICL"
 
 # 文本内容和形容词（直接修改即可）
 TEXT_CONTENT = "中国男性根本就配不上中国女性"
-ADJECTIVE = "理智的"
+ADJECTIVE = "包容的"
 
 # ICL模板专用：形容词定义（仅ICL模板使用，不需要时可留空）
-ADJECTIVE_DEFINITION = "具有敌意、冒犯性或威胁性的言语特征"
+ADJECTIVE_DEFINITION = "尊重和接纳不同群体或观点的态度，不对他人身份、地域或取向进行排斥或歧视的言论。"
 # ===================================================================
 
 
@@ -111,15 +111,23 @@ def build_prompt_and_verbalizer(template, text_content, adjective, adj_definitio
             - binary/ICL: {"affirmative": [...], "negative": [...]}
             - likert: {"likert": ["1", "2", "3", "4", "5"]}
     """
-    if template == "binary":
-        instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
-        prompt = f"{instruction}\n文本内容：{text_content}\n形容词：「{adjective}」描述是否准确？回答： "
-        verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", "yes",
-                            "否", "不", " 不", "No", " No", "no", " no"]
+    if template in ["binary", "ICL"]:
+        verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", " yes",
+                            "否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
         score_tokens = {
             "affirmative": ["是", " 是", "Yes", " Yes", "yes", "yes"],
-            "negative": ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"],
+            "negative": ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"],
         }
+
+        if template == "binary":
+            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
+            prompt = f"{instruction}\n文本内容：{text_content}\n形容词：「{adjective}」描述是否准确？回答： "
+        elif template == "ICL":
+            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
+            prompt = (f"{instruction}\n"
+                      f"文本内容：{text_content}\n"
+                      f"形容词「{adjective}」的定义：{adj_definition}\n"
+                      f"根据上述定义，该文本是否表现出该「{adjective}」所描述的特征？回答： ")
 
     elif template == "likert":
         instruction = ("你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
@@ -133,19 +141,6 @@ def build_prompt_and_verbalizer(template, text_content, adjective, adj_definitio
         verbalizer_words = ["1", "2", "3", "4", "5"]
         score_tokens = {
             "likert": ["1", "2", "3", "4", "5"],
-        }
-
-    elif template == "ICL":
-        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
-        prompt = (f"{instruction}\n"
-                  f"文本内容：{text_content}\n"
-                  f"形容词「{adjective}」的定义：{adj_definition}\n"
-                  f"根据上述定义，该文本是否表现出该「{adjective}」所描述的特征？回答： ")
-        verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", "yes",
-                            "否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
-        score_tokens = {
-            "affirmative": ["是", " 是", "Yes", " Yes", "yes", "yes"],
-            "negative": ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"],
         }
 
     else:

@@ -1,4 +1,4 @@
-"""生成形容词概念向量（基于肯定词概率和）
+"""生成形容词概念向量
 
 使用示例：
 python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
@@ -55,9 +55,9 @@ def parse_args():
     parser.add_argument(
         '--template',
         type=str,
-        choices=['binary', 'likert'],
+        choices=['binary', 'likert', 'ICL'],
         default='binary',
-        help='提示词模板类型：binary=二元判断(原始), likert=Likert程度量化'
+        help='提示词模板类型：binary=二元判断(原始), likert=Likert程度量化, ICL=引入形容词解释'
     )
 
     return parser.parse_args()
@@ -135,17 +135,23 @@ def _expand_prefix_cache(base_cache, batch_size: int):
     return tuple(expanded_layers)
 
 
-def generate_adj_concept(data_path, output_path, adjective_path, mode, template, tokenizer, model):
+def generate_adj_concept(data_path, output_path, adjective_path, template, tokenizer, model):
     device = next(model.parameters()).device
 
     # 根据模板类型定义verbalizer token（首token id集合）和提示词指令
-    if template == "binary":
-        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", "yes"]
-        negative_tokens = ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"]
+    if template in ["binary", "ICL"]:
+        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", " yes"]
+        negative_tokens = ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
         affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
         negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
 
-        instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
+        if template == "binary":
+            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
+        elif template == "ICL":
+            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
+            # 加载形容词解释
+            definition = pd.read_csv(adjective_path)["definition"].tolist()
+
 
     elif template == "likert":
         likert_tokens = ["1", "2", "3", "4", "5"]
@@ -159,15 +165,6 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                        "4 = 较强程度具有该特征\n"
                        "5 = 非常强烈地具有该特征")
 
-    elif template == "ICL":
-        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", "yes"]
-        negative_tokens = ["否", "不", " 不", "不能", "无",  "No", " No", "no", " no"]
-        affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer, device)
-        negative_ids = get_first_token_ids(negative_tokens, tokenizer, device)
-
-        instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
-        # 加载形容词解释
-        definition = pd.read_csv(adjective_path)["definition"].tolist()
 
     # 加载形容词词典
     adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
@@ -181,8 +178,8 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
 
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
         content = sample["content"]
-        concept_vector = []
-        raw_probs = []
+        concept_vector = []  # 当前批次的形容词向量
+        raw_probs = []  # 当前批次的原始概率
 
         # 构建公共前缀（指令+文本内容），计算KV缓存
         prefix_text = f"{instruction}\n文本内容：{content}\n"
@@ -279,8 +276,8 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
         results.append({"content": content, "toxic": sample["toxic"], "concept": concept_vector, "raw_probs": raw_probs})
 
         # 间隔清理缓存
-        if torch.cuda.is_available() and sample_idx % 128 == 0:
-            torch.cuda.empty_cache()
+        # if torch.cuda.is_available() and sample_idx % 128 == 0:
+        #     torch.cuda.empty_cache()
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
@@ -311,7 +308,7 @@ def main():
     print("=" * 60 + "\n")
 
     tokenizer, model = load_qwen_model(config.models_path, args.model_name)
-    generate_adj_concept(data_path, output_path, config.adjective_path, args.mode, args.template, tokenizer, model)
+    generate_adj_concept(data_path, output_path, config.adjective_path, args.template, tokenizer, model)
 
 
 if __name__ == '__main__':
