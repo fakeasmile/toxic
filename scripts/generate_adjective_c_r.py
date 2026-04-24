@@ -175,6 +175,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
         content = sample["content"]
         concept_vector = []
+        raw_probs = []
 
         # 构建公共前缀（指令+文本内容），计算KV缓存
         prefix_text = f"{instruction}\n文本内容：{content}\n"
@@ -196,7 +197,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                 if template == "binary":
                     suffix_texts.append(f"形容词：'{adj}'描述是否准确？回答：")
                 elif template == "likert":
-                    suffix_texts.append(f"形容词「{adj}」的程度等级（仅回答数字）：")
+                    suffix_texts.append(f"形容词'{adj}'的程度等级（仅回答数字）：")
             suffix_inputs = tokenizer(
                 suffix_texts,
                 return_tensors="pt",
@@ -240,11 +241,14 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                     neg_prob = probs[negative_ids].sum()
                     total = pos_prob + neg_prob + 1e-8
                     score = (pos_prob / total).item()
+                    raw_probs.append([pos_prob.item(), neg_prob.item()])
                 elif template == "likert":
                     weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], device=device)
+                    # level_probs = [0.07, 0.11, 0.20, 0.26, 0.22]
                     level_probs = torch.stack([probs[likert_ids[k]].sum() for k in range(1, 6)])
                     total_level_prob = level_probs.sum() + 1e-8
                     score = (weights * level_probs / total_level_prob).sum().item()
+                    raw_probs.append([level_probs[k].item() for k in range(5)])
 
                 concept_vector.append(score)
 
@@ -254,7 +258,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, mode, template,
                 f"concept_vector 长度异常：期望 {len(adjectives)}，实际 {len(concept_vector)}"
             )
 
-        results.append({"content": content, "toxic": sample["toxic"], "concept": concept_vector})
+        results.append({"content": content, "toxic": sample["toxic"], "concept": concept_vector, "raw_probs": raw_probs})
 
         # 间隔清理缓存
         if torch.cuda.is_available() and sample_idx % 128 == 0:
@@ -271,7 +275,7 @@ def main():
     config = MLPConfig()
 
     # 动态生成依赖 dataset_name/model_name 的路径
-    data_path = config.raw_data_path / args.dataset_name / f"mini_{args.mode}.json"
+    data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"
     concept_dir = config.processed_path / args.dataset_name / args.model_name / args.template
     concept_dir.mkdir(parents=True, exist_ok=True)
     output_path = concept_dir / f"concept_{args.mode}.json"
