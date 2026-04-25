@@ -1,25 +1,34 @@
-"""Qwen模型提示词模板分析工具
+"""Qwen模型提示词模板调试工具（单样本切片分析）
 
-主要功能：
-模拟 generate_adjective_c_r.py 的单样本推理流程，快速调试提示词和 Verbalizer，确认分数计算是否符合预期
-该脚本用于分析和调试不同提示词模板（binary / likert / ICL）在Qwen系列模型上的推理行为，
-帮助评估提示词模板的质量和合理性，为生成形容词概念向量提供调试支持。
-后续在论文中可以在末尾简短对提示词进行分析，以证明我们的工作量。
+【定位】
+本脚本是 generate_adjective_c_r.py 的“单样本切片”调试工具。
+generate_adjective_c_r.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
+而本脚本只抽取“一个文本 + 一个形容词”进行单步推理，用于在批量生成前快速验证
+提示词模板和 Verbalizer 词表的设计是否合理。
 
-具体分析项：
-1. 首token概率分布 Top-10：观察模型对第一个输出token的预测偏好，用于判断提示词
-   是否将模型输出约束到预期方向；
-2. 模型生成序列（10个token，贪心解码）：观察模型实际输出的文本是否通顺、符合模板要求；
-3. Verbalizer概率分析：统计预定义Verbalizer词表占总概率的比例，评估提示词对模型
-   输出的约束强度（理想区间约70%-90%）。
+【核心功能】
+1. 首 token 概率分布 Top-10
+   观察模型在第一个输出位置的概率分布。如果 Top-10 中大部分是 verbalizer 词表中的词，
+   说明提示词模板成功将模型输出约束到预期方向。
+2. 模型实际生成序列（贪心解码，10个token）
+   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答“是/否”或数字）。
+3. Verbalizer 概率分析
+   统计预定义 verbalizer 词表中所有词的概率总和，评估约束强度。
+   - 理想情况下，该总和应占模型首 token 概率质量的 70%~90% 以上。
+   - 若过低（如 < 0.5），说明模型大量概率分散到非预期词，提示词模板或 verbalizer 词表需改进。
 
-支持的模板类型（与generate_adjective_c_r.py保持一致）：
+【与 generate_adjective_c_r.py 的关系】
+- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 generate_adjective_c_r.py 完全一致。
+- 通过本脚本调试确认模板和 verbalizer 合理后，再运行 generate_adjective_c_r.py 进行批量生成，
+  可确保生成的概念向量质量。
+
+【支持的模板类型】
 - binary: 二元判断（是/否），用于判断形容词是否准确描述文本；
-- likert: 1-5程度量化，用于评估文本具有形容词特征的程度；
+- likert: 1-5 程度量化，用于评估文本具有形容词特征的程度；
 - ICL: 基于形容词定义的判断（In-Context Learning），引入形容词定义进行推理。
 
-使用方法：
-直接修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容、形容词等），然后运行：
+【使用方法】
+直接修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容、形容词、形容词定义等），然后运行：
 python scripts/inspect_prompt_template.py
 """
 import sys
@@ -95,7 +104,6 @@ def get_first_token_ids(word_list, tokenizer, device):
     if not token_ids:
         raise ValueError("get_first_token_ids ERROR")
 
-    token_ids = sorted(set(token_ids))
     return torch.tensor(list(dict.fromkeys(token_ids)), device=device, dtype=torch.long)
 
 
@@ -115,7 +123,7 @@ def build_prompt_and_verbalizer(template, text_content, adjective, adj_definitio
         verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", " yes",
                             "否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
         score_tokens = {
-            "affirmative": ["是", " 是", "Yes", " Yes", "yes", "yes"],
+            "affirmative": ["是", " 是", "Yes", " Yes", "yes", " yes"],
             "negative": ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"],
         }
 
