@@ -1,9 +1,9 @@
 """Qwen模型提示词模板调试工具（单样本切片分析）
 
 【定位】
-本脚本是 generate_adjective_c_r.py 的“单样本切片”调试工具。
+本脚本是 generate_adjective_c_r.py 的"单样本切片"调试工具。
 generate_adjective_c_r.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
-而本脚本只抽取“一个文本 + 一个形容词”进行单步推理，用于在批量生成前快速验证
+而本脚本只抽取"一个文本 + 一个形容词"进行单步推理，用于在批量生成前快速验证
 提示词模板和 Verbalizer 词表的设计是否合理。
 
 【核心功能】
@@ -11,7 +11,7 @@ generate_adjective_c_r.py 负责为数据集中所有文本、所有形容词批
    观察模型在第一个输出位置的概率分布。如果 Top-10 中大部分是 verbalizer 词表中的词，
    说明提示词模板成功将模型输出约束到预期方向。
 2. 模型实际生成序列（贪心解码，10个token）
-   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答“是/否”或数字）。
+   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答"是/否"或数字）。
 3. Verbalizer 概率分析
    统计预定义 verbalizer 词表中所有词的概率总和，评估约束强度。
    - 理想情况下，该总和应占模型首 token 概率质量的 70%~90% 以上。
@@ -107,35 +107,29 @@ def get_first_token_ids(word_list, tokenizer, device):
     return torch.tensor(list(dict.fromkeys(token_ids)), device=device, dtype=torch.long)
 
 
-def build_prompt_and_verbalizer(template, text_content, adjective, adj_definition=""):
+def build_chat_messages(template, text_content, adjective, adj_definition=""):
     """
-    根据模板类型构建完整的提示词和对应的Verbalizer词表。
+    根据模板类型构建Chat Template的messages列表。
     逻辑与 generate_adjective_c_r.py 中的模板构建保持一致。
-
-    返回:
-        prompt: 完整的提示词文本
-        verbalizer_words: 用于显示的verbalizer词列表
-        score_tokens: 用于分数计算的token分组字典
-            - binary/ICL: {"affirmative": [...], "negative": [...]}
-            - likert: {"likert": ["1", "2", "3", "4", "5"]}
     """
     if template in ["binary", "ICL"]:
+        if template == "binary":
+            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
+            user_content = f"文本内容：{text_content}\n形容词：「{adjective}」描述是否准确？回答： "
+        elif template == "ICL":
+            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
+            user_content = (
+                f"文本内容：{text_content}\n"
+                f"形容词「{adjective}」的定义：{adj_definition}\n"
+                f"根据上述定义，该文本是否表现出该「{adjective}」所描述的特征？回答： "
+            )
+
         verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", " yes",
                             "否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
         score_tokens = {
             "affirmative": ["是", " 是", "Yes", " Yes", "yes", " yes"],
             "negative": ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"],
         }
-
-        if template == "binary":
-            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
-            prompt = f"{instruction}\n文本内容：{text_content}\n形容词：「{adjective}」描述是否准确？回答： "
-        elif template == "ICL":
-            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
-            prompt = (f"{instruction}\n"
-                      f"文本内容：{text_content}\n"
-                      f"形容词「{adjective}」的定义：{adj_definition}\n"
-                      f"根据上述定义，该文本是否表现出该「{adjective}」所描述的特征？回答： ")
 
     elif template == "likert":
         instruction = ("你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
@@ -145,7 +139,7 @@ def build_prompt_and_verbalizer(template, text_content, adjective, adj_definitio
                        "3 = 中等程度具有该特征\n"
                        "4 = 较强程度具有该特征\n"
                        "5 = 非常强烈地具有该特征")
-        prompt = f"{instruction}\n文本内容：{text_content}\n形容词「{adjective}」的程度等级（直接回答数字）： "
+        user_content = f"文本内容：{text_content}\n形容词「{adjective}」的程度等级（直接回答数字）： "
         verbalizer_words = ["1", "2", "3", "4", "5"]
         score_tokens = {
             "likert": ["1", "2", "3", "4", "5"],
@@ -154,7 +148,12 @@ def build_prompt_and_verbalizer(template, text_content, adjective, adj_definitio
     else:
         raise ValueError(f"不支持的模板类型: {template}，可选: binary, likert, ICL")
 
-    return prompt, verbalizer_words, score_tokens
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": user_content},
+    ]
+
+    return messages, verbalizer_words, score_tokens
 
 
 def main():
@@ -163,9 +162,16 @@ def main():
     tokenizer, model = load_qwen_model(config.models_path, MODEL_NAME)
     device = next(model.parameters()).device
 
-    # 根据模板构建提示词和Verbalizer
-    prompt, verbalizer_words, score_tokens = build_prompt_and_verbalizer(
+    # 根据模板构建Chat Template messages
+    messages, verbalizer_words, score_tokens = build_chat_messages(
         PROMPT_TEMPLATE, TEXT_CONTENT, ADJECTIVE, ADJECTIVE_DEFINITION
+    )
+
+    # 生成完整prompt文本
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
     )
 
     print("\n" + "=" * 60)
@@ -178,7 +184,7 @@ def main():
     print(f"提示词: {prompt}")
 
     # 编码提示词
-    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
     print(f"\n提示词token数: {inputs['input_ids'].shape[1]}")
 
     # 推理

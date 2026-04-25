@@ -1,4 +1,4 @@
-"""生成形容词概念向量
+"""生成形容词概念向量（Chat Template版本）
 
 使用示例：
 python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
@@ -12,7 +12,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from transformers.cache_utils import DynamicCache
 
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
@@ -62,25 +61,25 @@ def parse_args():
 
     return parser.parse_args()
 
+
 def load_qwen_model(model_path: Path, model_name: str):
     """加载模型和分词器"""
-    llm_path = model_path / model_name  # LLM模型路径
-    # 判断llm目录是否存在
+    llm_path = model_path / model_name
     if not llm_path.exists():
         raise ValueError(f"LLM path {llm_path} does not exist")
 
     quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,  # 4bit量化
+        load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,  #
-        bnb_4bit_compute_dtype=torch.float16,  # 半精度
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.float16,
     )
 
     print(f"Loading tokenizer from {llm_path}")
     tokenizer = AutoTokenizer.from_pretrained(
         llm_path,
         trust_remote_code=True,
-        padding_side="right",  # PAD右填充
+        padding_side="right",
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -111,28 +110,29 @@ def get_first_token_ids(word_list, tokenizer, device):
     return torch.tensor(list(dict.fromkeys(token_ids)), device=device, dtype=torch.long)
 
 
-def _expand_prefix_cache(base_cache, batch_size: int):
+def build_chat_messages(template, instruction, content, adj, adj_definition=""):
     """
-    将单样本 prefix cache:[1, num_heads, L_prefix, head_dim] 扩展到 batch 维度。
-    同时兼容 legacy tuple cache 与 DynamicCache。
+    根据模板类型构建Chat Template的messages列表。
+    与手动拼接方式在语义上等价，但使用标准Chat Template格式。
     """
-    if isinstance(base_cache, DynamicCache):
-        legacy_cache = base_cache.to_legacy_cache()
-        expanded = DynamicCache()
-        for layer_idx, kv in enumerate(legacy_cache):
-            k, v = kv[0], kv[1]
-            k_expanded = k.expand(batch_size, -1, -1, -1).contiguous()  # [batch_size, num_heads, L_prefix, head_dim]
-            v_expanded = v.expand(batch_size, -1, -1, -1).contiguous()
-            expanded.update(k_expanded, v_expanded, layer_idx)
-        return expanded
+    if template == "binary":
+        user_content = f"文本内容：{content}\n形容词：「{adj}」描述是否准确？回答： "
+    elif template == "likert":
+        user_content = f"文本内容：{content}\n形容词「{adj}」的程度等级（直接回答数字）： "
+    elif template == "ICL":
+        user_content = (
+            f"文本内容：{content}\n"
+            f"形容词「{adj}」的定义：{adj_definition}\n"
+            f"根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： "
+        )
+    else:
+        raise ValueError(f"不支持的模板类型: {template}")
 
-    expanded_layers = []
-    for kv in base_cache:
-        k, v = kv[0], kv[1]
-        k_expanded = k.expand(batch_size, -1, -1, -1).contiguous()
-        v_expanded = v.expand(batch_size, -1, -1, -1).contiguous()
-        expanded_layers.append((k_expanded, v_expanded))
-    return tuple(expanded_layers)
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": user_content},
+    ]
+    return messages
 
 
 def generate_adj_concept(data_path, output_path, adjective_path, template, tokenizer, model):
@@ -152,7 +152,6 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
             # 加载形容词解释
             definition = pd.read_csv(adjective_path)["definition"].tolist()
 
-
     elif template == "likert":
         likert_tokens = ["1", "2", "3", "4", "5"]
         likert_ids = get_first_token_ids(likert_tokens, tokenizer, device)
@@ -164,7 +163,6 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
                        "3 = 中等程度具有该特征\n"
                        "4 = 较强程度具有该特征\n"
                        "5 = 非常强烈地具有该特征")
-
 
     # 加载形容词词典
     adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
@@ -181,70 +179,49 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
         concept_vector = []  # 当前批次的形容词向量
         raw_probs = []  # 当前批次的原始概率
 
-        # 构建公共前缀（指令+文本内容），计算KV缓存
-        prefix_text = f"{instruction}\n文本内容：{content}\n"
-        prefix_inputs = tokenizer(prefix_text, return_tensors="pt", add_special_tokens=True).to(device)
-
-        with torch.no_grad():
-            prefix_outputs = model(**prefix_inputs, use_cache=True)
-            base_cache = prefix_outputs.past_key_values
-            prefix_len = prefix_inputs["input_ids"].shape[1]
-
-        # 按批次遍历形容词，复用前缀KV缓存
+        # 按批次遍历形容词，每个形容词使用独立的Chat Template prompt
         for i in range(0, len(adjectives), batch_size):
             adj_batch = adjectives[i: i + batch_size]
-            curr_bsz = len(adj_batch)  # 当前批次大小
+            curr_bsz = len(adj_batch)
 
             # ICL模板：同步获取当前批次的形容词定义
             if template == "ICL":
                 def_batch = definition[i: i + batch_size]
 
-            # 构建当前模板的后缀
-            suffix_texts = []
+            # 为每个形容词构建完整的Chat Template prompt
+            prompt_texts = []
             for index, adj in enumerate(adj_batch):
-                if template == "binary":
-                    suffix_texts.append(f"形容词：「{adj}」描述是否准确？回答： ")
-                elif template == "likert":
-                    suffix_texts.append(f"形容词「{adj}」的程度等级（直接回答数字）： ")
-                elif template == "ICL":
-                    suffix_texts.append(f"形容词「{adj}」的定义：{def_batch[index]}\n根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： ")
-            suffix_inputs = tokenizer(
-                suffix_texts,
+                if template == "ICL":
+                    messages = build_chat_messages(template, instruction, content, adj, def_batch[index])
+                else:
+                    messages = build_chat_messages(template, instruction, content, adj)
+
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                prompt_texts.append(prompt_text)
+
+            # Batch编码
+            inputs = tokenizer(
+                prompt_texts,
                 return_tensors="pt",
                 padding=True,
                 add_special_tokens=False,
             ).to(device)
-            suffix_len = suffix_inputs["input_ids"].shape[1]
 
-            # position_ids：后缀token的位置从prefix_len开始递增
-            position_ids = torch.arange(prefix_len, prefix_len + suffix_len, device=device).unsqueeze(0)
-            position_ids = position_ids.expand(curr_bsz, -1).contiguous()
-
-            # 扩展前缀缓存到当前batch大小，拼接完整attention_mask
-            expanded_cache = _expand_prefix_cache(base_cache, curr_bsz)
-            prefix_mask = torch.ones(
-                (curr_bsz, prefix_len),
-                device=device,
-                dtype=suffix_inputs["attention_mask"].dtype,
-            )
-            full_mask = torch.cat([prefix_mask, suffix_inputs["attention_mask"]], dim=1)
-
+            # Batch推理
             with torch.no_grad():
-                outputs = model(
-                    input_ids=suffix_inputs["input_ids"],
-                    attention_mask=full_mask,
-                    position_ids=position_ids,
-                    past_key_values=expanded_cache,
-                    use_cache=False,
-                )
+                outputs = model(**inputs, use_cache=False)
 
             logits = outputs.logits
-            last_token_indices = suffix_inputs["attention_mask"].sum(dim=1) - 1
+            last_token_indices = inputs["attention_mask"].sum(dim=1) - 1
 
             # 对每个形容词，根据模板类型提取概率并打分
             for j, last_idx in enumerate(last_token_indices):
                 target_logits = logits[j, last_idx, :]
-                probs = torch.softmax(target_logits.float(), dim=-1)  # 得到当前形容词对第一个token的概率分布
+                probs = torch.softmax(target_logits.float(), dim=-1)
 
                 if template == "binary":
                     pos_prob = probs[affirmative_ids].sum()
@@ -274,10 +251,6 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
             )
 
         results.append({"content": content, "toxic": sample["toxic"], "concept": concept_vector, "raw_probs": raw_probs})
-
-        # 间隔清理缓存
-        # if torch.cuda.is_available() and sample_idx % 128 == 0:
-        #     torch.cuda.empty_cache()
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)

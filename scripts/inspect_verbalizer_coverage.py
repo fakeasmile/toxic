@@ -1,10 +1,10 @@
 """Verbalizer覆盖率全景分析工具（全形容词扫描）
 
 【定位】
-本脚本是 generate_adjective_c_r.py 的“全形容词切片”评估工具。
+本脚本是 generate_adjective_c_r.py 的"全形容词切片"评估工具。
 generate_adjective_c_r.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
 inspect_prompt_template.py 负责在单样本级别（一个文本 + 一个形容词）调试提示词和 verbalizer；
-而本脚本则对“一条固定文本 + 全部形容词（约236个）”进行扫描，评估该提示词模板和 verbalizer 词表
+而本脚本则对"一条固定文本 + 全部形容词（约236个）"进行扫描，评估该提示词模板和 verbalizer 词表
 在整个形容词词典上的覆盖能力是否稳定。
 
 【核心功能】
@@ -17,16 +17,16 @@ inspect_prompt_template.py 负责在单样本级别（一个文本 + 一个形�
 - total_prob 理想区间：0.6 ~ 1.0（多数形容词应在此范围内）
   - 接近 1.0：模型首 token 概率质量高度集中在 verbalizer 词表内，提示词约束能力强，
     verbalizer 词表统计完整。
-  - 低于 0.5：模型大量概率分散到非预期词（如“我”、“这”、“可能”等），说明提示词模板
+  - 低于 0.5：模型大量概率分散到非预期词（如"我"、"这"、"可能"等），说明提示词模板
     未能有效约束输出方向，或 verbalizer 词表遗漏了模型偏好的表达形式，需改进。
 - 通过观察 total_prob 在不同形容词上的波动，可识别出哪些类型的形容词容易导致模型输出失控，
   从而针对性优化提示词或扩充 verbalizer 词表。
 
 【与 generate_adjective_c_r.py / inspect_prompt_template.py 的关系】
-- 本脚本的提示词构建逻辑、verbalizer 词表、KV Cache 复用机制、分数计算逻辑与 
+- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 
   generate_adjective_c_r.py 完全一致。
-- inspect_prompt_template.py 用于“点”级别的单样本调试（快速迭代提示词和 verbalizer）；
-- 本脚本用于“面”级别的全景验证（确认改进后的模板和 verbalizer 在整个形容词词典上表现稳定）；
+- inspect_prompt_template.py 用于"点"级别的单样本调试（快速迭代提示词和 verbalizer）；
+- 本脚本用于"面"级别的全景验证（确认改进后的模板和 verbalizer 在整个形容词词典上表现稳定）；
 - 两者结合，确保 generate_adjective_c_r.py 批量生成的概念向量质量可靠。
 
 【输出】
@@ -49,7 +49,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from transformers.cache_utils import DynamicCache
 
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
@@ -123,25 +122,29 @@ def get_first_token_ids(word_list, tokenizer, device):
     return torch.tensor(list(dict.fromkeys(token_ids)), device=device, dtype=torch.long)
 
 
-def _expand_prefix_cache(base_cache, batch_size: int):
-    """将单样本prefix cache扩展到batch维度（兼容DynamicCache和tuple）"""
-    if isinstance(base_cache, DynamicCache):
-        legacy_cache = base_cache.to_legacy_cache()
-        expanded = DynamicCache()
-        for layer_idx, kv in enumerate(legacy_cache):
-            k, v = kv[0], kv[1]
-            k_expanded = k.expand(batch_size, -1, -1, -1).contiguous()
-            v_expanded = v.expand(batch_size, -1, -1, -1).contiguous()
-            expanded.update(k_expanded, v_expanded, layer_idx)
-        return expanded
+def build_chat_messages(template, instruction, content, adj, adj_definition=""):
+    """
+    根据模板类型构建Chat Template的messages列表。
+    与 generate_adjective_c_r.py 中的模板构建保持一致。
+    """
+    if template == "binary":
+        user_content = f"文本内容：{content}\n形容词：「{adj}」描述是否准确？回答： "
+    elif template == "likert":
+        user_content = f"文本内容：{content}\n形容词「{adj}」的程度等级（直接回答数字）： "
+    elif template == "ICL":
+        user_content = (
+            f"文本内容：{content}\n"
+            f"形容词「{adj}」的定义：{adj_definition}\n"
+            f"根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： "
+        )
+    else:
+        raise ValueError(f"不支持的模板类型: {template}")
 
-    expanded_layers = []
-    for kv in base_cache:
-        k, v = kv[0], kv[1]
-        k_expanded = k.expand(batch_size, -1, -1, -1).contiguous()
-        v_expanded = v.expand(batch_size, -1, -1, -1).contiguous()
-        expanded_layers.append((k_expanded, v_expanded))
-    return tuple(expanded_layers)
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": user_content},
+    ]
+    return messages
 
 
 def analyze_verbalizer_coverage(
@@ -154,11 +157,11 @@ def analyze_verbalizer_coverage(
     model_name: str,
 ):
     """
-    对单条文本遍历所有形容词，计算verbalizer概率总和并可视化。
+    对单条文本遍历所有形容词，使用 Chat Template 计算 verbalizer 概率总和并可视化。
     """
     device = next(model.parameters()).device
 
-    # 根据模板类型定义verbalizer token和提示词指令
+    # 根据模板类型定义 verbalizer token 和提示词指令
     if template in ["binary", "ICL"]:
         affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", " yes"]
         negative_tokens = ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
@@ -189,19 +192,11 @@ def analyze_verbalizer_coverage(
     adjectives = adj_df["chinese"].tolist()
     adj_en_list = adj_df["adjective"].tolist() if "adjective" in adj_df.columns else [""] * len(adjectives)
 
-    # 构建公共前缀（指令+文本内容），计算KV缓存
-    prefix_text = f"{instruction}\n文本内容：{text_content}\n"
-    prefix_inputs = tokenizer(prefix_text, return_tensors="pt", add_special_tokens=True).to(device)
-
-    with torch.no_grad():
-        prefix_outputs = model(**prefix_inputs, use_cache=True)
-        base_cache = prefix_outputs.past_key_values
-        prefix_len = prefix_inputs["input_ids"].shape[1]
-
     # 存储结果
     results = []
     batch_size = 16
 
+    # 使用 batch 推理（每个形容词独立构建完整 Chat Template prompt）
     for i in tqdm(range(0, len(adjectives), batch_size), desc="Processing adjectives"):
         adj_batch = adjectives[i:i + batch_size]
         curr_bsz = len(adj_batch)
@@ -209,47 +204,35 @@ def analyze_verbalizer_coverage(
         if template == "ICL":
             def_batch = definition[i:i + batch_size]
 
-        # 构建后缀
-        suffix_texts = []
+        # 为每个形容词构建完整的 Chat Template prompt
+        prompt_texts = []
         for index, adj in enumerate(adj_batch):
-            if template == "binary":
-                suffix_texts.append(f"形容词：「{adj}」描述是否准确？回答： ")
-            elif template == "likert":
-                suffix_texts.append(f"形容词「{adj}」的程度等级（直接回答数字）： ")
-            elif template == "ICL":
-                suffix_texts.append(
-                    f"形容词「{adj}」的定义：{def_batch[index]}\n"
-                    f"根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： "
-                )
+            if template == "ICL":
+                messages = build_chat_messages(template, instruction, text_content, adj, def_batch[index])
+            else:
+                messages = build_chat_messages(template, instruction, text_content, adj)
 
-        suffix_inputs = tokenizer(
-            suffix_texts,
+            prompt_text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            prompt_texts.append(prompt_text)
+
+        # Batch 编码
+        inputs = tokenizer(
+            prompt_texts,
             return_tensors="pt",
             padding=True,
             add_special_tokens=False,
         ).to(device)
-        suffix_len = suffix_inputs["input_ids"].shape[1]
 
-        # position_ids
-        position_ids = torch.arange(prefix_len, prefix_len + suffix_len, device=device).unsqueeze(0)
-        position_ids = position_ids.expand(curr_bsz, -1).contiguous()
-
-        # 扩展prefix cache和attention mask
-        expanded_cache = _expand_prefix_cache(base_cache, curr_bsz)
-        prefix_mask = prefix_inputs["attention_mask"].expand(curr_bsz, -1).contiguous()
-        full_mask = torch.cat([prefix_mask, suffix_inputs["attention_mask"]], dim=1)
-
+        # Batch 推理
         with torch.no_grad():
-            outputs = model(
-                input_ids=suffix_inputs["input_ids"],
-                attention_mask=full_mask,
-                position_ids=position_ids,
-                past_key_values=expanded_cache,
-                use_cache=False,
-            )
+            outputs = model(**inputs, use_cache=False)
 
         logits = outputs.logits
-        last_token_indices = suffix_inputs["attention_mask"].sum(dim=1) - 1
+        last_token_indices = inputs["attention_mask"].sum(dim=1) - 1
 
         # 提取每个形容词的概率
         for j, last_idx in enumerate(last_token_indices):
