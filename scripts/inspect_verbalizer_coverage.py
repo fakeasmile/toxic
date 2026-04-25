@@ -135,7 +135,7 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
         user_content = (
             f"文本内容：{content}\n"
             f"形容词「{adj}」的定义：{adj_definition}\n"
-            f"根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： "
+            f"根据上述定义，该文本是否表现出该形容词「{adj}」所描述的特征？回答： "
         )
     else:
         raise ValueError(f"不支持的模板类型: {template}")

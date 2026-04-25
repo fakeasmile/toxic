@@ -121,7 +121,7 @@ def build_chat_messages(template, text_content, adjective, adj_definition=""):
             user_content = (
                 f"文本内容：{text_content}\n"
                 f"形容词「{adjective}」的定义：{adj_definition}\n"
-                f"根据上述定义，该文本是否表现出该「{adjective}」所描述的特征？回答： "
+                f"根据上述定义，该文本是否表现出该形容词「{adjective}」所描述的特征？回答： "
             )
 
         verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", " yes",

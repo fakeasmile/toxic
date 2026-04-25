@@ -26,7 +26,7 @@ def parse_args():
         description="生成形容词概念向量",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="使用示例:"
-               "python scripts/generate_adjective_c_r.py --mode {train/test} --dataset_name TOXICN --model_name ..."
+               "python scripts/generate_adjective_c_r.py --mode test --dataset_name TOXICN --model_name ... --template binary"
     )
 
     parser.add_argument(
@@ -97,7 +97,7 @@ def load_qwen_model(model_path: Path, model_name: str):
 
 
 def get_first_token_ids(word_list, tokenizer, device):
-    """获取词表中每个词的token id（如果词被编码为了多个token，只取第一个token id）"""
+    """获取词表中每个词的首token id（目前已保证每个词只会对应一个token id）"""
     token_ids = []
     for word in word_list:
         encoded = tokenizer.encode(word, add_special_tokens=False)
@@ -123,7 +123,7 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
         user_content = (
             f"文本内容：{content}\n"
             f"形容词「{adj}」的定义：{adj_definition}\n"
-            f"根据上述定义，该文本是否表现出该「{adj}」所描述的特征？回答： "
+            f"根据上述定义，该文本是否表现出该形容词「{adj}」所描述的特征？回答： "
         )
     else:
         raise ValueError(f"不支持的模板类型: {template}")
