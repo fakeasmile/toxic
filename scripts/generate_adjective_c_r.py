@@ -172,7 +172,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
         data_set = json.load(f)
 
     results = []
-    batch_size = 16  # 形容词批量推理大小
+    batch_size = 4  # 形容词批量推理大小（减小以避免OOM）
 
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
         content = sample["content"]
@@ -244,6 +244,11 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
 
                 concept_vector.append(score)
 
+            # 及时释放大内存张量，避免累积
+            del outputs, logits, inputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         # 防御性校验，确保每条文本输出的形容词概念长度与形容词数量一致
         if len(concept_vector) != len(adjectives):
             raise RuntimeError(
@@ -251,6 +256,10 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
             )
 
         results.append({"content": content, "toxic": sample["toxic"], "concept": concept_vector, "raw_probs": raw_probs})
+
+        # 每个样本处理后清理GPU缓存，防止内存累积
+        if torch.cuda.is_available() and sample_idx % 4 == 0:
+            torch.cuda.empty_cache()
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
