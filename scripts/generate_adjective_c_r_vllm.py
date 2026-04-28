@@ -200,7 +200,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
             prompts.append(prompt_text)
 
         # 批量推理
-        outputs = llm_model.generate(prompts, sampling_params)  # 表示对文本+所有形容词的推理结果
+        outputs = llm_model.generate(prompts, sampling_params, use_tqdm=False)  # 表示对文本+所有形容词的推理结果
 
         for sample_info in outputs:  # sample_info表示文本+某个形容词的推理结果
             # 提取logprobs
@@ -279,7 +279,7 @@ def main():
     config = MLPConfig()  # 加载模型配置
 
     # 动态生成依赖 dataset_name/model_name 的路径
-    data_path = config.raw_data_path / args.dataset_name / f"mini_{args.mode}.json"  # 原始数据集目录
+    data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"  # 原始数据集目录
     concept_dir = config.processed_path / args.dataset_name / args.model_name / args.template  # 概念向量输出目录
     concept_dir.mkdir(parents=True, exist_ok=True)
     output_path = concept_dir / f"concept_{args.mode}.json"
