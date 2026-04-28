@@ -1,6 +1,25 @@
-"""生成形容词概念向量（vLLM版本）
+"""生成形容词概念向量（Chat Template,vLLM版本）
 
-基于Chat Template生成形容词概念向量，使用vLLM加速批量推理。
+【执行流程】
+1. 加载vLLM模型和tokenizer（float16，无量化，vLLM引擎）
+2. 根据模板类型定义verbalizer token词表（肯定词/否定词/Likert等级）和系统指令
+3. 遍历数据集中的每条文本：
+   a. 对该文本，为所有形容词一次性构建全部Chat Template prompt（无需手动分batch）
+   b. vLLM自动调度批量推理，内部处理padding和KV Cache复用
+   c. 从推理结果中提取首token的logprobs分布（Top-20，exp转换为概率）
+   d. 从概率分布中提取verbalizer token的概率，按类别求和
+   e. 归一化计算score（binary/ICL: pos/(pos+neg)；likert: 加权期望），作为该形容词与文本的相关程度
+   f. 收集所有形容词的score组成概念向量
+4. 保存结果JSON（content, toxic, concept向量, raw_probs）
+
+【与Chat Template版本的关系】
+本脚本与generate_adjective_c_r.py逻辑等价，区别仅在于推理后端：
+- 本脚本：vLLM加速推理，自动批量调度，无需手动padding，速度更快
+- Chat Template版本：transformers原生推理，需手动分batch和padding，速度较慢
+
+【配套调试工具】
+- inspect_prompt_template_vllm.py：单样本切片（1文本+1形容词），调试提示词和verbalizer
+- inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率
 
 使用示例：
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary

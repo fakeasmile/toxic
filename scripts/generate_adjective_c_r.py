@@ -1,5 +1,27 @@
 """生成形容词概念向量（Chat Template版本）
 
+【执行流程】
+1. 加载LLM模型和tokenizer（4bit量化，transformers原生推理）
+2. 根据模板类型定义verbalizer token词表（肯定词/否定词/Likert等级）和系统指令
+3. 遍历数据集中的每条文本：
+   a. 对该文本，遍历所有形容词（按batch_size=4分批）
+   b. 为每个(文本, 形容词)组合构建Chat Template prompt
+   c. 使用tokenizer.batch_encode对每批prompt进行padding编码
+   d. 模型推理获取输出logits，提取prompt最后一个token位置的首token概率分布（softmax归一化）
+   e. 从概率分布中提取verbalizer token的概率，按类别求和
+   f. 归一化计算score（binary/ICL: pos/(pos+neg)；likert: 加权期望），作为该形容词与文本的相关程度
+   g. 收集所有形容词的score组成概念向量
+4. 保存结果JSON（content, toxic, concept向量, raw_probs）
+
+【与vLLM版本的关系】
+本脚本与generate_adjective_c_r_vllm.py逻辑等价，区别仅在于推理后端：
+- 本脚本：transformers原生推理，需手动分batch和padding，速度较慢
+- vLLM版本：vLLM加速推理，自动批量调度，无需手动padding，速度更快
+
+【配套调试工具】
+- inspect_prompt_template.py：单样本切片（1文本+1形容词），调试提示词和verbalizer
+- inspect_verbalizer_coverage.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率
+
 使用示例：
 python scripts/generate_adjective_c_r.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
 """
