@@ -176,13 +176,12 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
 
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples"), start=1):
         content = sample["content"]
-        concept_vector = []  # 当前批次的形容词向量
-        raw_probs = []  # 当前批次的原始概率
+        concept_vector = []  # 当前文本对应的形容词向量
+        raw_probs = []  # 当前文本的每个形容词，其verbalizer token对应的原始概率
 
-        # 按批次遍历形容词，每个形容词使用独立的Chat Template prompt
+        # 按批次遍历形容词
         for i in range(0, len(adjectives), batch_size):
-            adj_batch = adjectives[i: i + batch_size]
-            curr_bsz = len(adj_batch)
+            adj_batch = adjectives[i: i + batch_size]  # 一个形容词批次
 
             # ICL模板：同步获取当前批次的形容词定义
             if template == "ICL":
@@ -196,6 +195,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
                 else:
                     messages = build_chat_messages(template, instruction, content, adj)
 
+                # 添加<|im_start|>system,<|im_start|>user,<|im_start|>assistant特殊token
                 prompt_text = tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
@@ -216,12 +216,12 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
                 outputs = model(**inputs, use_cache=False)
 
             logits = outputs.logits
-            last_token_indices = inputs["attention_mask"].sum(dim=1) - 1
+            last_token_indices = inputs["attention_mask"].sum(dim=1) - 1  # 每个Chat Template的最后一个token的索引
 
             # 对每个形容词，根据模板类型提取概率并打分
             for j, last_idx in enumerate(last_token_indices):
                 target_logits = logits[j, last_idx, :]
-                probs = torch.softmax(target_logits.float(), dim=-1)
+                probs = torch.softmax(target_logits.float(), dim=-1)  # 基于词表的归一化概率
 
                 if template == "binary":
                     pos_prob = probs[affirmative_ids].sum()
@@ -249,6 +249,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        # 一条文本对应的所有形容词概念概率生成完成
         # 防御性校验，确保每条文本输出的形容词概念长度与形容词数量一致
         if len(concept_vector) != len(adjectives):
             raise RuntimeError(
