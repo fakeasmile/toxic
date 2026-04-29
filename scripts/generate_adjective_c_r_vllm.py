@@ -22,7 +22,14 @@
 - inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率
 
 使用示例：
+# 无量化推理
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
+# AWQ量化推理
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template binary --quantization awq
+# FP8量化推理
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --quantization fp8
+# 自定义GPU显存占用
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --gpu_memory_utilization 0.8
 """
 
 import argparse
@@ -82,10 +89,25 @@ def parse_args():
         help='提示词模板类型：binary=二元判断(原始), likert=Likert程度量化, ICL=引入形容词解释'
     )
 
+    parser.add_argument(
+        '--gpu_memory_utilization',
+        type=float,
+        default=0.85,
+        help='vLLM GPU显存占用比例（0.0-1.0），默认0.85'
+    )
+
+    parser.add_argument(
+        '--quantization',
+        type=str,
+        default=None,
+        choices=[None, 'awq', 'fp8'],
+        help='量化方法：awq/fp8，None表示不使用量化（默认）'
+    )
+
     return parser.parse_args()
 
 
-def load_vllm_model(model_path: Path, model_name: str):
+def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85, quantization: str = None):
     """加载vLLM模型和tokenizer"""
     llm_path = model_path / model_name
     if not llm_path.exists():
@@ -104,9 +126,9 @@ def load_vllm_model(model_path: Path, model_name: str):
     llm = LLM(
         model=str(llm_path),
         trust_remote_code=True,
-        dtype="float16",
-        quantization=None,  # 不使用量化
-        gpu_memory_utilization=0.7,  # 最多占用GPU显存的比例
+        dtype="auto",
+        quantization=quantization,
+        gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
         max_num_seqs=256,
@@ -310,11 +332,13 @@ def main():
     print(f"LLM模型名称: {args.model_name}")
     print(f"提示词模板: {args.template}")
     print(f"当前模式: {args.mode}")
+    print(f"量化方法: {args.quantization if args.quantization else '无量化'}")
+    print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"数据集路径: {data_path}")
     print(f"输出路径: {output_path}")
     print("=" * 60 + "\n")
 
-    tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name)
+    tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization, args.quantization)
     generate_adj_concept(data_path, output_path, config.adjective_path, args.template, tokenizer, llm_model)
 
     print("生成完成")

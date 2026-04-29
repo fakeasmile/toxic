@@ -63,7 +63,7 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-1.5B-Instruct"  # models目录下的模型文件夹名
+MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 
 # 提示词模板类型，可选: "binary", "likert", "ICL"
 PROMPT_TEMPLATE = "ICL"
@@ -73,10 +73,14 @@ TEXT_CONTENT = "中国男性根本就配不上中国女性"
 
 # 输出目录（相对于项目根目录）
 OUTPUT_DIR = "experiments/verbalizer_coverage"
+
+# vLLM推理配置
+GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
+QUANTIZATION = None  # 量化方法：None/awq/fp8
 # ===================================================================
 
 
-def load_vllm_model(model_path: Path, model_name: str):
+def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85, quantization: str = None):
     """加载vLLM模型和tokenizer（复用generate_adjective_c_r_vllm逻辑）"""
     llm_path = model_path / model_name
     if not llm_path.exists():
@@ -95,9 +99,9 @@ def load_vllm_model(model_path: Path, model_name: str):
     llm = LLM(
         model=str(llm_path),
         trust_remote_code=True,
-        dtype="float16",
-        quantization=None,
-        gpu_memory_utilization=0.7,
+        dtype="auto",
+        quantization=quantization,
+        gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
         max_num_seqs=256,
@@ -348,10 +352,12 @@ def main():
     print(f"模型名称: {MODEL_NAME}")
     print(f"提示词模板: {PROMPT_TEMPLATE}")
     print(f"文本内容: {TEXT_CONTENT}")
+    print(f"量化方法: {QUANTIZATION if QUANTIZATION else '无量化'}")
+    print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
     print(f"输出目录: {output_dir}")
     print("=" * 60 + "\n")
 
-    tokenizer, llm_model = load_vllm_model(config.models_path, MODEL_NAME)
+    tokenizer, llm_model = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION, QUANTIZATION)
     analyze_verbalizer_coverage(
         text_content=TEXT_CONTENT,
         template=PROMPT_TEMPLATE,
