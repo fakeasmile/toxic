@@ -62,6 +62,7 @@ ADJECTIVE_DEFINITION = "尊重和接纳不同群体或观点的态度，不对�
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
 QUANTIZATION = None  # 量化方法：None/awq/fp8
+TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
 # ===================================================================
 
 
@@ -186,6 +187,7 @@ def main():
     print(f"形容词: {ADJECTIVE}")
     print(f"量化方法: {QUANTIZATION if QUANTIZATION else '无量化'}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
+    print(f"采样温度: {TEMPERATURE}")
     print(f"提示词: {prompt}")
 
     print(f"\n提示词token数: {len(tokenizer.encode(prompt))}")
@@ -209,6 +211,14 @@ def main():
     probs_dict = {}
     for token_id, logprob_obj in first_token_logprobs.items():
         probs_dict[token_id] = math.exp(logprob_obj.logprob)
+
+    # 手动应用temperature（vLLM的logprobs返回原始概率，不受temperature影响）
+    if TEMPERATURE > 0:
+        logits = {tid: math.log(p + 1e-10) for tid, p in probs_dict.items()}
+        adjusted_logits = {tid: l / TEMPERATURE for tid, l in logits.items()}
+        max_logit = max(adjusted_logits.values())
+        exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
+        probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
 
     # 输出概率最高的前10个token
     topk = 10

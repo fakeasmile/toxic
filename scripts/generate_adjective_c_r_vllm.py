@@ -99,6 +99,13 @@ def parse_args():
         help='量化方法：awq/fp8，None表示不使用量化（默认）'
     )
 
+    parser.add_argument(
+        '--temperature',
+        type=float,
+        default=2.0,
+        help='采样温度（默认2.0），用于控制概率分布的分散程度'
+    )
+
     return parser.parse_args()
 
 
@@ -255,6 +262,17 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 logprob_obj = last_token_logprobs[token_id]
                 probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
+            # 手动应用temperature（vLLM的logprobs返回原始概率，不受temperature影响）
+            if args.temperature > 0:
+                # 反推logits（log(p) = logit - log(sum(exp(logits)))，在同一组内归一化常数相同）
+                logits = {tid: math.log(p + 1e-10) for tid, p in probs_dict.items()}
+                # 应用temperature
+                adjusted_logits = {tid: l / args.temperature for tid, l in logits.items()}
+                # 重新softmax
+                max_logit = max(adjusted_logits.values())
+                exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
+                probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
+
             # 根据模板类型计算score
             if template == "binary":
                 # 计算肯定词的概率之和
@@ -350,6 +368,7 @@ def main():
     print(f"当前模式: {args.mode}")
     print(f"量化方法: {args.quantization if args.quantization else '无量化'}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
+    print(f"采样温度: {args.temperature}")
     print(f"数据集路径: {data_path}")
     print(f"JSON输出路径: {output_path}")
     print(f"CSV输出路径: {csv_output_path}")

@@ -69,7 +69,7 @@ MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 PROMPT_TEMPLATE = "likert"
 
 # 文本内容（直接修改即可）
-TEXT_CONTENT = "中国男性根本就配不上中国女性"
+TEXT_CONTENT = "什么被害妄想猎巫man"
 
 # 输出目录（相对于项目根目录）
 OUTPUT_DIR = "experiments/verbalizer_coverage"
@@ -77,6 +77,7 @@ OUTPUT_DIR = "experiments/verbalizer_coverage"
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
 QUANTIZATION = None  # 量化方法：None/awq/fp8
+TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
 # ===================================================================
 
 
@@ -230,6 +231,14 @@ def analyze_verbalizer_coverage(
         for token_id, logprob_obj in first_token_logprobs.items():
             probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
+        # 手动应用temperature（vLLM的logprobs返回原始概率，不受temperature影响）
+        if TEMPERATURE > 0:
+            logits = {tid: math.log(p + 1e-10) for tid, p in probs_dict.items()}
+            adjusted_logits = {tid: l / TEMPERATURE for tid, l in logits.items()}
+            max_logit = max(adjusted_logits.values())
+            exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
+            probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
+
         if template in ["binary", "ICL"]:
             pos_prob = sum(probs_dict.get(tid, 0.0) for tid in affirmative_ids)
             neg_prob = sum(probs_dict.get(tid, 0.0) for tid in negative_ids)
@@ -248,6 +257,12 @@ def analyze_verbalizer_coverage(
             # 计算概率最高的数字分数（1-5映射到0.0-1.0）
             max_level_idx = level_probs.index(max(level_probs))
             max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
+            # 计算加权期望likert分数（与generate_adjective_c_r_vllm.py一致）
+            weights = [0.0, 0.25, 0.5, 0.75, 1.0]
+            if total_prob > 0:
+                likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob
+            else:
+                likert_score = 0.0
             results.append({
                 "index": adj_idx,
                 "adjective_en": adj_en_list[adj_idx],
@@ -259,6 +274,7 @@ def analyze_verbalizer_coverage(
                 "level_5_prob": round(level_probs[4], 6),
                 "total_prob": round(total_prob, 6),
                 "max_level_score": round(max_level_score, 6),
+                "likert_score": round(likert_score, 6),
             })
 
     # 保存JSON数据
@@ -300,8 +316,10 @@ def analyze_verbalizer_coverage(
     elif template == "likert":
         total_probs = [r["total_prob"] for r in results]
         max_level_scores = [r["max_level_score"] for r in results]
+        likert_scores = [r["likert_score"] for r in results]
         ax.plot(x, total_probs, label="total_prob (Likert verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
         ax.plot(x, max_level_scores, label="max_level_score (概率最高数字分数)", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
+        ax.plot(x, likert_scores, label="likert_score (加权期望分数)", color="green", alpha=0.8, linewidth=1.0, linestyle="-.")
 
         mean_total = sum(total_probs) / len(total_probs)
         ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")
@@ -359,6 +377,7 @@ def main():
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"量化方法: {QUANTIZATION if QUANTIZATION else '无量化'}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
+    print(f"采样温度: {TEMPERATURE}")
     print(f"输出目录: {output_dir}")
     print("=" * 60 + "\n")
 
