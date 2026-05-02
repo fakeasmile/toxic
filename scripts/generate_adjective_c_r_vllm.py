@@ -12,11 +12,6 @@
    f. 收集所有形容词的score组成概念向量
 4. 保存结果JSON（content, toxic, concept向量, raw_probs）
 
-【与Chat Template版本的关系】
-本脚本与generate_adjective_c_r.py逻辑等价，区别仅在于推理后端：
-- 本脚本：vLLM加速推理，自动批量调度，无需手动padding，速度更快
-- Chat Template版本：transformers原生推理，需手动分batch和padding，速度较慢
-
 【配套调试工具】
 - inspect_prompt_template_vllm.py：单样本切片（1文本+1形容词），调试提示词和verbalizer
 - inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率
