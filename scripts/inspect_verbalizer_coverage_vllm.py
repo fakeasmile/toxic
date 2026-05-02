@@ -66,7 +66,7 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 
 # 提示词模板类型，可选: "binary", "likert", "ICL"
-PROMPT_TEMPLATE = "ICL"
+PROMPT_TEMPLATE = "likert"
 
 # 文本内容（直接修改即可）
 TEXT_CONTENT = "中国男性根本就配不上中国女性"
@@ -133,7 +133,7 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
     if template == "binary":
         user_content = f"文本内容：{content}\n形容词：「{adj}」描述是否准确？回答： "
     elif template == "likert":
-        user_content = f"文本内容：{content}\n形容词「{adj}」的程度等级（直接回答数字）： "
+        user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
     elif template == "ICL":
         user_content = (
             f"文本内容：{content}\n"
@@ -178,15 +178,14 @@ def analyze_verbalizer_coverage(
     elif template == "likert":
         likert_tokens = ["1", "2", "3", "4", "5"]
         likert_ids = get_first_token_ids(likert_tokens, tokenizer)
-        instruction = (
-            "你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
-            "请严格按照1到5的等级进行评估：\n"
-            "1 = 完全不具有该特征\n"
-            "2 = 略微具有该特征\n"
-            "3 = 中等程度具有该特征\n"
-            "4 = 较强程度具有该特征\n"
-            "5 = 非常强烈地具有该特征"
-        )
+        instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+                       "评估等级：\n"
+                       "1 = 完全不相关\n"
+                       "2 = 不太相关\n"
+                       "3 = 有点相关\n"
+                       "4 = 比较相关\n"
+                       "5 = 非常相关\n"
+                       "直接回答数字。")
 
     # 加载形容词词典
     adj_df = pd.read_csv(adjective_path)
@@ -246,6 +245,9 @@ def analyze_verbalizer_coverage(
         elif template == "likert":
             level_probs = [probs_dict.get(tid, 0.0) for tid in likert_ids]
             total_prob = sum(level_probs)
+            # 计算概率最高的数字分数（1-5映射到0.0-1.0）
+            max_level_idx = level_probs.index(max(level_probs))
+            max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
             results.append({
                 "index": adj_idx,
                 "adjective_en": adj_en_list[adj_idx],
@@ -256,6 +258,7 @@ def analyze_verbalizer_coverage(
                 "level_4_prob": round(level_probs[3], 6),
                 "level_5_prob": round(level_probs[4], 6),
                 "total_prob": round(total_prob, 6),
+                "max_level_score": round(max_level_score, 6),
             })
 
     # 保存JSON数据
@@ -296,7 +299,9 @@ def analyze_verbalizer_coverage(
 
     elif template == "likert":
         total_probs = [r["total_prob"] for r in results]
+        max_level_scores = [r["max_level_score"] for r in results]
         ax.plot(x, total_probs, label="total_prob (Likert verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
+        ax.plot(x, max_level_scores, label="max_level_score (概率最高数字分数)", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
 
         mean_total = sum(total_probs) / len(total_probs)
         ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")

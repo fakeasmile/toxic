@@ -47,14 +47,14 @@ from configs.MLP_config import MLPConfig
 
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-1.5B-Instruct"  # models目录下的模型文件夹名
+MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 
 # 提示词模板类型，可选: "binary", "likert", "ICL"
-PROMPT_TEMPLATE = "binary"
+PROMPT_TEMPLATE = "likert"
 
 # 文本内容和形容词（直接修改即可）
-TEXT_CONTENT = "中国男性根本就配不上中国女性"
-ADJECTIVE = "攻击性的"
+TEXT_CONTENT = "什么被害妄想猎巫man"
+ADJECTIVE = "包容的"
 
 # ICL模板专用：形容词定义（仅ICL模板使用，不需要时可留空）
 ADJECTIVE_DEFINITION = "尊重和接纳不同群体或观点的态度，不对他人身份、地域或取向进行排斥或歧视的言论。"
@@ -135,14 +135,15 @@ def build_chat_messages(template, text_content, adjective, adj_definition=""):
         }
 
     elif template == "likert":
-        instruction = ("你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
-                       "请严格按照1到5的等级进行评估：\n"
-                       "1 = 完全不具有该特征\n"
-                       "2 = 略微具有该特征\n"
-                       "3 = 中等程度具有该特征\n"
-                       "4 = 较强程度具有该特征\n"
-                       "5 = 非常强烈地具有该特征")
-        user_content = f"文本内容：{text_content}\n形容词「{adjective}」的程度等级（直接回答数字）： "
+        instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+                       "评估等级：\n"
+                       "1 = 完全不相关\n"
+                       "2 = 不太相关\n"
+                       "3 = 有点相关\n"
+                       "4 = 比较相关\n"
+                       "5 = 非常相关\n"
+                       "直接回答数字。")
+        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n回答： "
         verbalizer_words = ["1", "2", "3", "4", "5"]
         score_tokens = {
             "likert": ["1", "2", "3", "4", "5"],
@@ -221,7 +222,7 @@ def main():
         print(f"{rank:<4} {tid:<10} {repr(token_text):<12} {prob:<12.6f} {cumsum:<10.6f}")
 
     # 模型生成的10个词（贪心解码）
-    print(f"\n模型生成 Top-10（贪心解码，每次取概率最高的token）:")
+    print(f"\n模型生成序列（贪心解码，max_tokens=10）:")
     sampling_params_gen = SamplingParams(
         max_tokens=10,
         temperature=0,
@@ -231,6 +232,7 @@ def main():
     generated_text = outputs_gen[0].outputs[0].text
     generated_ids = outputs_gen[0].outputs[0].token_ids
     print(f"生成token序列: {generated_ids}")
+    print(f"生成token数量: {len(generated_ids)}")
     print(f"生成文本: {repr(generated_text)}")
 
     # Verbalizer分析

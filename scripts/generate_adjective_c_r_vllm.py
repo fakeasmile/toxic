@@ -158,7 +158,7 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
     if template == "binary":
         user_content = f"文本内容：{content}\n形容词：「{adj}」描述是否准确？回答： "
     elif template == "likert":
-        user_content = f"文本内容：{content}\n形容词「{adj}」的程度等级（直接回答数字）： "
+        user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
     elif template == "ICL":
         user_content = (
             f"文本内容：{content}\n"
@@ -174,7 +174,7 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
     ]
     return messages
 
-def generate_adj_concept(data_path, output_path, adjective_path, template, tokenizer, llm_model):
+def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, template, tokenizer, llm_model, threshold=1e-4):
     # 根据模板类型定义verbalizer token（首token id集合）和提示词指令
     if template in ["binary", "ICL"]:
         # verbalizer tokens
@@ -194,13 +194,14 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
         likert_tokens = ["1", "2", "3", "4", "5"]
         likert_ids = get_first_token_ids(likert_tokens, tokenizer)
 
-        instruction = ("你是一位社会心理学专家。请评估以下文本具有给定形容词所描述特征的程度。\n"
-                       "请严格按照1到5的等级进行评估：\n"
-                       "1 = 完全不具有该特征\n"
-                       "2 = 略微具有该特征\n"
-                       "3 = 中等程度具有该特征\n"
-                       "4 = 较强程度具有该特征\n"
-                       "5 = 非常强烈地具有该特征")
+        instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+                       "评估等级：\n"
+                       "1 = 完全不相关\n"
+                       "2 = 不太相关\n"
+                       "3 = 有点相关\n"
+                       "4 = 比较相关\n"
+                       "5 = 非常相关\n"
+                       "直接回答数字。")
 
     # 加载形容词词典
     adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
@@ -217,6 +218,7 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
     )
 
     results = []
+    concept_matrix = []  # 用于保存CSV矩阵 [N, V]
 
     # 批量推理
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples")):
@@ -290,13 +292,13 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
                 level_probs = []
                 for tid in likert_ids:
                     level_probs.append(probs_dict.get(tid, 0.0))
-                
+
                 weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
                 level_probs = torch.tensor(level_probs)
                 total_level_prob = level_probs.sum() + 1e-8
                 score = (weights * level_probs / total_level_prob).sum().item()
                 raw_probs.append(level_probs.tolist())
-                
+
             concept_vector.append(score)
 
         # 防御性校验，确保每条文本输出的形容词概念长度与形容词数量一致
@@ -305,13 +307,31 @@ def generate_adj_concept(data_path, output_path, adjective_path, template, token
                 f"concept_vector 长度异常：期望 {len(adjectives)}，实际 {len(concept_vector)}"
             )
 
-        # 保存当前文本的推理结果
-        results.append({"content": content, "toxic": sample["toxic"], "concept": concept_vector, "raw_probs": raw_probs})
+        # 截断极小值：小于threshold的分数设为0
+        truncated_vector = []
+        for s in concept_vector:
+            if abs(s) >= threshold:
+                truncated_vector.append(s)
+            else:
+                truncated_vector.append(0.0)
+        concept_matrix.append(truncated_vector)
 
-    # 将所有结果保存到JSON文件
+        # 保存当前文本的推理结果（保留content、toxic和截断后的concept）
+        results.append({"content": content, "toxic": sample["toxic"], "concept": truncated_vector})
+
+    # 保存JSON文件（content + toxic）
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
-    print(f"形容词概念向量保存到: {output_path}")
+    print(f"形容词概念向量(JSON)保存到: {output_path}")
+
+    # 保存CSV矩阵文件 [N, V]，横轴为文本，纵轴为形容词
+    df = pd.DataFrame(concept_matrix, columns=adjectives)
+    df.insert(0, "content", [r["content"] for r in results])
+    df.insert(1, "toxic", [r["toxic"] for r in results])
+    df.to_csv(csv_output_path, index=False, encoding="utf-8-sig")
+    print(f"形容词概念向量(CSV)保存到: {csv_output_path}")
+    print(f"矩阵形状: [{len(concept_matrix)}, {len(adjectives)}] (文本数, 形容词数)")
+    print(f"截断阈值: {threshold}，小于该值的分数已设为0")
 
 
 def main():
@@ -324,6 +344,7 @@ def main():
     concept_dir = config.processed_path / args.dataset_name / args.model_name / args.template  # 概念向量输出目录
     concept_dir.mkdir(parents=True, exist_ok=True)
     output_path = concept_dir / f"concept_{args.mode}.json"
+    csv_output_path = concept_dir / f"concept_{args.mode}.csv"
     # 打印配置信息
     print("\n" + "=" * 60)
     print("形容词概念向量生成(vLLM) - 配置信息")
@@ -335,11 +356,12 @@ def main():
     print(f"量化方法: {args.quantization if args.quantization else '无量化'}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"数据集路径: {data_path}")
-    print(f"输出路径: {output_path}")
+    print(f"JSON输出路径: {output_path}")
+    print(f"CSV输出路径: {csv_output_path}")
     print("=" * 60 + "\n")
 
     tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization, args.quantization)
-    generate_adj_concept(data_path, output_path, config.adjective_path, args.template, tokenizer, llm_model)
+    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.template, tokenizer, llm_model, threshold=1e-4)
 
     print("生成完成")
 
