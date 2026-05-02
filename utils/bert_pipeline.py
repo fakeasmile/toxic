@@ -19,10 +19,10 @@
 
 使用示例:
     # 1. 训练+测试
-    python utils/bert_pipeline.py --mode all
+    python utils/bert_pipeline.py --mode all --dataset_name TOXICN
 
     # 2. 仅训练模式
-    python utils/bert_pipeline.py --mode train
+    python utils/bert_pipeline.py --mode train --dataset_name TOXICN
 
     # 3. 仅测试模式 (必须指定实验时间戳)
     python utils/bert_pipeline.py --mode test --timestamp 20260421-120000
@@ -36,7 +36,7 @@
         --timestamp         测试模式时的实验时间戳 (如: 20260421-120000)
 
     数据集配置:
-        --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
+        --dataset_name      数据集名称 (TOXICN/COLD)，训练模式必传
 
     随机种子:
         --seed              随机种子 (默认: 1)
@@ -150,10 +150,12 @@ def update_BERTConfig(args):
     """
     config = BERTConfig()
 
-    if args.dataset_name is not None:
-        config.dataset_name = args.dataset_name
-    config.train_path = config.base_path / "data" / "raw" / config.dataset_name / "train.json"
-    config.test_path = config.base_path / "data" / "raw" / config.dataset_name / "test.json"
+    if args.dataset_name is None:
+        raise ValueError("训练模式必须指定 --dataset_name")
+
+    config.dataset_name = args.dataset_name
+    config.train_path = config.raw_data_path / config.dataset_name / "train.json"
+    config.test_path = config.raw_data_path / config.dataset_name / "test.json"
 
     if args.seed is not None:
         config.seed = args.seed
@@ -182,8 +184,11 @@ def load_raw_data(config, mode):
     path = config.train_path if mode == "train" else config.test_path
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    texts = [item["content"] for item in data if isinstance(item["content"], str)]
-    labels = [item["toxic"] for item in data if isinstance(item["content"], str)]
+    texts, labels = [], []
+    for item in data:
+        if isinstance(item.get("content"), str):
+            texts.append(item["content"])
+            labels.append(item["toxic"])
     return texts, labels
 
 
