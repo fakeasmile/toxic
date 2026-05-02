@@ -21,7 +21,7 @@
         --batch_size 16
         --epochs 5
         --max_seq_length 128
-        --dropout_rate 0.3
+        --dropout_rate 0.5
         --patience 2
         --use_deterministic
         --seed 42
@@ -52,7 +52,7 @@
         --patience          早停耐心值 (验证集F1连续patience个epoch未提升则停止, 默认: 2)
 
     模型结构参数:
-        --dropout_rate      Dropout比率 (默认: 0.3)
+        --dropout_rate      Dropout比率 (默认: 0.5)
 
 参数优先级:
     - 训练模式: 命令行参数 > ConceptGuidedAttentionConfig默认值（命令行参数覆盖ConceptGuidedAttentionConfig参数）

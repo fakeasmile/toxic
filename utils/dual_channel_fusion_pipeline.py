@@ -21,7 +21,7 @@
         --batch_size 16
         --epochs 5
         --max_seq_length 128
-        --dropout_rate 0.3
+        --dropout_rate 0.5
         --proj_dim 128
         --patience 2
         --use_deterministic
@@ -53,7 +53,7 @@
         --patience          早停耐心值 (验证集F1连续patience个epoch未提升则停止, 默认: 2)
 
     融合模型结构参数:
-        --dropout_rate      Dropout比率 (默认: 0.3)
+        --dropout_rate      Dropout比率 (默认: 0.5)
         --proj_dim          投影维度 (默认: 128)
 
 参数优先级:
