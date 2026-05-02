@@ -66,5 +66,5 @@ scripts/encode_tokens_qwen.py
 # Data & Experiments
 data/
 experiments/
-experiments_bert/
+experiments_*/
 ```

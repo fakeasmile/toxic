@@ -1,75 +1,67 @@
-"""MLP训练与测试。
+"""双通道融合模型（BERT + 形容词概念向量）训练与测试。
 
 整合训练和测试功能,实现训练完成后自动测试的流水线。
 支持命令行参数配置,确保训练-测试配置一致性。
 
 使用示例:
     # 1. 训练+测试
-    python utils/mlp_pipeline.py --mode all
-    
+    python utils/dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
+
     # 2. 仅训练模式
-    python utils/mlp_pipeline.py --mode train
-    
+    python utils/dual_channel_fusion_pipeline.py --mode train --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
+
     # 3. 仅测试模式 (必须指定实验时间戳)
-    python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
+    python utils/dual_channel_fusion_pipeline.py --mode test --timestamp 20260415-085433 --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
 
     # 4. 自定义数据集和超参数（完整命令）
-    python utils/mlp_pipeline.py --mode all
+    python utils/dual_channel_fusion_pipeline.py --mode all
         --dataset_name COLD
-        --model_name Qwen2.5-1.5B-Instruct
+        --model_name Qwen2.5-3B-Instruct
         --template binary
-        --batch_size 32
-        --epochs 100
-        --max_lr 5e-4
-        --pct_start 0.2
-        --div_factor 25
-        --final_div_factor 10000
-        --anneal_strategy cos
-        --dropout_rate 0.4
-        --hidden_features 128
-        --patience 20
+        --batch_size 16
+        --epochs 5
+        --max_seq_length 128
+        --dropout_rate 0.3
+        --proj_dim 128
+        --patience 2
         --use_deterministic
         --seed 42
     一般情况下：
-    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --epochs 500 --use_deterministic
-    
+    python utils/dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert --epochs 5 --use_deterministic
+
     # 5. 启用确定性模式 (确保实验可复现)
-    python utils/mlp_pipeline.py --mode all --use_deterministic --seed 42
+    python utils/dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert --use_deterministic --seed 42
 
 命令行参数说明:
     运行模式:
         --mode              运行模式: all (训练+测试, 默认), train (仅训练), test (仅测试)
         --timestamp         测试模式时的实验时间戳 (如: 20260415-085433)
-    
+
     数据集配置:
         --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
-        --model_name        LLM模型名称 (默认: Qwen2.5-1.5B-Instruct)
-        --template          提示词模板类型 (binary/likert, 默认: binary)
-    
+        --model_name        LLM模型名称 (默认: Qwen2.5-3B-Instruct)
+        --template          提示词模板类型 (binary/likert, 默认: likert)
+
     随机种子:
         --seed              随机种子 (默认: 1)
         --use_deterministic 启用确定性模式 (确保实验可复现，默认：False)
-    
+
     训练超参数:
         --batch_size        批次大小 (默认: 16)
-        --epochs            训练轮数 (默认: 200)
-        --max_lr            峰值学习率 (默认: 1e-3)
-        --pct_start         Warmup比例 (默认: 0.2)
-        --div_factor        初始学习率除数 (默认: 25.0)
-        --final_div_factor  最终学习率除数 (默认: 10000.0)
-        --anneal_strategy   衰减策略: cos (余弦) 或 linear (线性), 默认: cos
-    
-    MLP模型结构参数:
+        --epochs            训练轮数 (默认: 5)
+        --max_seq_length    最大序列长度 (默认: 128)
+        --patience          早停耐心值 (验证集F1连续patience个epoch未提升则停止, 默认: 2)
+
+    融合模型结构参数:
         --dropout_rate      Dropout比率 (默认: 0.3)
-        --hidden_features   隐藏层维度 (默认: 96)
-        --patience          早停耐心值 (默认: 20)
+        --proj_dim          投影维度 (默认: 128)
 
 参数优先级:
-    - 训练模式: 命令行参数 > MLP_config.py（命令行参数覆盖MLP_config参数）
+    - 训练模式: 命令行参数 > DualChannelFusionConfig默认值（命令行参数覆盖DualChannelFusionConfig参数）
     - 测试模式: 强制使用实验目录的 config.json (忽略命令行超参数)
 
 输出文件:
-    实验目录结构 (experiments/<timestamp>/):
+    实验目录结构 (experiments_dual_channel_fusion/<timestamp>/):
         ├── config.json              # 实验配置快照
         ├── best_model.pth           # 最佳模型权重
         ├── metrics.png              # 训练曲线图
@@ -79,8 +71,9 @@
             └── predictions.json     # 逐条预测结果
 
 注意事项:
-    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_adjective_c_r.py)
+    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_adjective_c_r_vllm.py)
     2. 测试模式必须指定有效的实验时间戳
+    3. dataset_name、model_name、template 为训练模式必传参数，用于定位概念向量路径
 """
 
 import argparse
@@ -91,43 +84,66 @@ from pathlib import Path
 from datetime import datetime
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 import torch.optim as optim
+from transformers import BertTokenizer, get_linear_schedule_with_warmup
 from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
 
-# 添加项目根目录到 Python 路径
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from configs.MLP_config import MLPConfig
-from models.mlp import MLP
+from configs.dual_channel_fusion_config import DualChannelFusionConfig
+from models.bert import DualChannelFusion
 
-# 配置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
+
+
+class FusionDataset(Dataset):
+    """融合模型数据集，封装tokenizer编码、概念向量和标签。"""
+
+    def __init__(self, encodings, concept_vectors, labels):
+        """
+        :param encodings: tokenizer编码结果（包含input_ids, attention_mask, token_type_ids）
+        :param concept_vectors: 概念向量张量
+        :param labels: 标签张量
+        """
+        self.encodings = encodings
+        self.concept_vectors = concept_vectors
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        item = {key: val[idx] for key, val in self.encodings.items()}
+        item['concept_vector'] = self.concept_vectors[idx]
+        item['labels'] = self.labels[idx]
+        return item
 
 
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description="MLP 训练与测试统一流水线",
+        description="双通道融合模型 训练与测试统一流水线",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-    使用示例:
+使用示例:
   # 完整流水线 (训练+测试)
-  python mlp_pipeline.py --mode all
-  
+  python dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
+
   # 仅训练
-  python mlp_pipeline.py --mode train
-  
+  python dual_channel_fusion_pipeline.py --mode train --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
+
   # 仅测试
-  python mlp_pipeline.py --mode test --timestamp 20260415-085433
-  
+  python dual_channel_fusion_pipeline.py --mode test --timestamp 20260415-085433 --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
+
   # 自定义超参数
-  python mlp_pipeline.py --mode all --dataset_name COLD --epochs 100 --hidden_features 128
+  python dual_channel_fusion_pipeline.py --mode all --dataset_name COLD --model_name Qwen2.5-3B-Instruct --template binary --epochs 10 --proj_dim 256
         """
     )
 
@@ -148,11 +164,11 @@ def parse_args():
         help='测试模式时的实验时间戳 (如: 20260415-085433)'
     )
 
-    # 数据集配置
-    parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
-    parser.add_argument('--model_name', type=str, default='Qwen2.5-1.5B-Instruct', help='LLM模型名称')
-    parser.add_argument('--template', type=str, choices=['binary', 'likert'], default='binary',
-                        help='提示词模板类型：binary=二元判断, likert=Likert程度量化')
+    # 数据集配置（训练模式必传，用于定位概念向量路径）
+    parser.add_argument('--dataset_name', type=str, default=None, help='数据集名称 (TOXICN/COLD)，训练模式必传')
+    parser.add_argument('--model_name', type=str, default=None, help='LLM模型名称，训练模式必传')
+    parser.add_argument('--template', type=str, choices=['binary', 'likert'], default=None,
+                        help='提示词模板类型：binary=二元判断, likert=Likert程度量化，训练模式必传')
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')
@@ -161,103 +177,122 @@ def parse_args():
     # 训练超参数
     parser.add_argument('--batch_size', type=int, default=None, help='批次大小')
     parser.add_argument('--epochs', type=int, default=None, help='训练轮数')
-    parser.add_argument('--max_lr', type=float, default=None, help='峰值学习率')
-    parser.add_argument('--pct_start', type=float, default=None, help='Warmup比例')
-    parser.add_argument('--div_factor', type=float, default=None, help='初始学习率除数')
-    parser.add_argument('--final_div_factor', type=float, default=None, help='最终学习率除数')
-    parser.add_argument('--anneal_strategy', type=str, default=None, help='衰减策略 (cos/linear)')
-
-    # 模型结构参数
-    parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
-    parser.add_argument('--hidden_features', type=int, default=None, help='隐藏层维度')
+    parser.add_argument('--max_seq_length', type=int, default=None, help='最大序列长度')
     parser.add_argument('--patience', type=int, default=None, help='早停耐心值 (验证集F1连续patience个epoch未提升则停止)')
+
+    # 融合模型结构参数
+    parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
+    parser.add_argument('--proj_dim', type=int, default=None, help='投影维度')
 
     return parser.parse_args()
 
 
-def update_MLPConfig(args):
-    """基于MLP_config参数，根据命令行参数更新配置对象
+def update_DualChannelFusionConfig(args):
+    """基于DualChannelFusionConfig默认值，根据命令行参数更新配置对象。
 
-    优先级: 命令行参数 > MLPConfig默认值
+    优先级: 命令行参数 > DualChannelFusionConfig默认值
+
+    :param args: 命令行参数
+    :return: 更新后的 DualChannelFusionConfig 对象
     """
-    mlp_config = MLPConfig()  # MLP_config.py中的配置对象
+    config = DualChannelFusionConfig()
 
-    # 数据集与模板配置
-    mlp_config.dataset_name = args.dataset_name
-    mlp_config.model_name = args.model_name
-    mlp_config.template = args.template
+    # 校验训练模式必传参数
+    if args.dataset_name is None or args.model_name is None or args.template is None:
+        raise ValueError("训练模式必须指定 --dataset_name, --model_name, --template")
 
-    # 动态生成依赖 dataset_name/model_name/template 的路径
-    mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                     / mlp_config.model_name / mlp_config.template / "concept_train.json")
-    mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                    / mlp_config.model_name / mlp_config.template / "concept_test.json")
+    # 数据集与模板配置，动态生成依赖路径
+    config.dataset_name = args.dataset_name
+    config.model_name = args.model_name
+    config.template = args.template
+    config.train_path = config.raw_data_path / config.dataset_name / "train.json"
+    config.test_path = config.raw_data_path / config.dataset_name / "test.json"
+    config.train_concept_path = (config.processed_path / config.dataset_name
+                                 / config.model_name / config.template / "concept_train.json")
+    config.test_concept_path = (config.processed_path / config.dataset_name
+                                / config.model_name / config.template / "concept_test.json")
 
     # 随机种子
     if args.seed is not None:
-        mlp_config.seed = args.seed
+        config.seed = args.seed
 
-    # 确定性模式
-    if args.use_deterministic:  # store_true默认为False，只有显式传入才为True
-        mlp_config.use_deterministic = True
+    if args.use_deterministic:
+        config.use_deterministic = True
 
     # 训练超参数
     if args.batch_size is not None:
-        mlp_config.batch_size = args.batch_size
+        config.batch_size = args.batch_size
     if args.epochs is not None:
-        mlp_config.epochs = args.epochs
-    if args.max_lr is not None:
-        mlp_config.max_lr = args.max_lr
-    if args.pct_start is not None:
-        mlp_config.pct_start = args.pct_start
-    if args.div_factor is not None:
-        mlp_config.div_factor = args.div_factor
-    if args.final_div_factor is not None:
-        mlp_config.final_div_factor = args.final_div_factor
-    if args.anneal_strategy is not None:
-        mlp_config.anneal_strategy = args.anneal_strategy
-
-    # 模型结构参数
-    if args.dropout_rate is not None:
-        mlp_config.dropout_rate = args.dropout_rate
-    if args.hidden_features is not None:
-        mlp_config.hidden_features = args.hidden_features
+        config.epochs = args.epochs
+    if args.max_seq_length is not None:
+        config.max_seq_length = args.max_seq_length
     if args.patience is not None:
-        mlp_config.patience = args.patience
+        config.patience = args.patience
 
-    return mlp_config
+    # 融合模型结构参数
+    if args.dropout_rate is not None:
+        config.dropout_rate = args.dropout_rate
+    if args.proj_dim is not None:
+        config.proj_dim = args.proj_dim
+
+    return config
 
 
 def load_data(config, mode):
-    """加载指定训练或测试的概念向量和标签。
+    """加载原始文本数据和概念向量，按content对齐。
 
-    概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
-
-    Args:
-        config: 配置文件
-        mode: train/test，区分加载训练或实验数据集
-
-    Returns:
-        tuple: (concepts, labels) 概念向量和标签张量
+    :param config: DualChannelFusionConfig 配置对象
+    :param mode: "train" 或 "test"
+    :return: (texts, labels, concepts) 文本列表、标签列表、概念向量列表
     """
-
     if mode == "train":
+        raw_path = config.train_path
         concept_path = config.train_concept_path
     elif mode == "test":
+        raw_path = config.test_path
         concept_path = config.test_concept_path
     else:
         raise ValueError("in load_data, mode must be 'train' or 'test'")
 
-    # 加载概念向量文件（已包含 content, toxic, concept 字段）
+    with open(raw_path, "r", encoding="utf-8") as f:
+        raw_data = json.load(f)
+
     with open(concept_path, "r", encoding="utf-8") as f:
-        raw_concept_data = json.load(f)
+        concept_data = json.load(f)
 
-    concepts, labels = [], []
-    for item in raw_concept_data:
-        concepts.append(item["concept"])
-        labels.append(item["toxic"])
+    # 构建content→概念向量的映射，用于对齐
+    concept_map = {}
+    for item in concept_data:
+        concept_map[item["content"]] = item["concept"]
 
-    return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+    texts, labels, concepts = [], [], []
+    for item in raw_data:
+        content = item["content"]
+        if content in concept_map:
+            texts.append(content)
+            labels.append(item["toxic"])
+            concepts.append(concept_map[content])
+
+    return texts, labels, concepts
+
+
+def tokenize_and_build_dataset(texts, labels, concepts, tokenizer, max_seq_length):
+    """对文本进行tokenize编码，与概念向量一起构建FusionDataset。
+
+    :param texts: 文本列表
+    :param labels: 标签列表
+    :param concepts: 概念向量列表
+    :param tokenizer: BertTokenizer 实例
+    :param max_seq_length: 最大序列长度
+    :return: FusionDataset 实例
+    """
+    encodings = tokenizer(
+        texts, padding='max_length', truncation=True,
+        max_length=max_seq_length, return_tensors='pt'
+    )
+    labels_tensor = torch.tensor(labels, dtype=torch.long)
+    concept_tensor = torch.tensor(concepts, dtype=torch.float32)
+    return FusionDataset(encodings, concept_tensor, labels_tensor)
 
 
 def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_recalls,
@@ -267,7 +302,7 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
     上图: Loss曲线（Val Loss + Test Loss）
     下图: Score曲线（Val F1, Val Precision, Val Recall, Test F1）
 
-    :param config: MLPConfig 配置对象
+    :param config: DualChannelFusionConfig 配置对象
     :param epochs: 轮次列表
     :param val_losses: 验证集损失列表
     :param val_f1_scores: 验证集F1列表
@@ -283,7 +318,7 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
     ax1.plot(epochs, test_losses, color='tab:orange', linestyle='--', label='Test Loss')
     ax1.set_ylabel('Loss')
     ax1.legend(loc='upper right')
-    ax1.set_title('MLP Training Metrics')
+    ax1.set_title('Fusion Training Metrics')
     ax1.grid(True, linestyle='--', alpha=0.6)
 
     # 下图: Score
@@ -304,14 +339,15 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
 
 
 def train(config, train_dataset, val_dataset, test_dataset):
-    """训练MLP模型。
+    """训练双通道融合模型。
 
+    使用AdamW优化器 + linear warmup/decay学习率调度 + 梯度裁剪。
     基于验证集F1进行早停和最佳模型选择，同时观察测试集F1但不参与模型筛选。
 
-    :param config: MLPConfig 配置对象
-    :param train_dataset: 训练集 (concepts, labels)
-    :param val_dataset: 验证集 (concepts, labels)
-    :param test_dataset: 测试集 (concepts, labels)，仅观察F1变化，不参与模型筛选
+    :param config: DualChannelFusionConfig 配置对象
+    :param train_dataset: 训练集
+    :param val_dataset: 验证集
+    :param test_dataset: 测试集（仅观察F1变化，不参与模型筛选）
     :return: (epochs, val_losses, val_f1_scores, val_precisions, val_recalls, test_f1_scores, test_losses)
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -321,27 +357,23 @@ def train(config, train_dataset, val_dataset, test_dataset):
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
-    # 初始化模型
-    model = MLP(
-        in_features=train_dataset[0][0].shape[0],
-        dropout_rate=config.dropout_rate,
-        hidden_features=config.hidden_features
+    # 初始化模型（concept_dim从数据自动推断）
+    concept_dim = train_dataset.concept_vectors.shape[1]
+    model = DualChannelFusion(
+        bert_path=str(config.bert_path),
+        concept_dim=concept_dim,
+        proj_dim=config.proj_dim,
+        dropout_rate=config.dropout_rate
     ).to(device)
 
     # 损失函数、优化器、学习率调度器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=config.max_lr / config.div_factor)
+    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
 
     total_steps = len(train_loader) * config.epochs
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=config.max_lr,
-        total_steps=total_steps,
-        pct_start=config.pct_start,
-        anneal_strategy=config.anneal_strategy,
-        div_factor=config.div_factor,
-        final_div_factor=config.final_div_factor,
-        three_phase=False
+    warmup_steps = int(total_steps * config.warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
 
     # 训练状态
@@ -359,30 +391,42 @@ def train(config, train_dataset, val_dataset, test_dataset):
     test_f1_history = []
     test_loss_history = []
 
-    for epoch in range(config.epochs):
+    for epoch in tqdm(range(config.epochs), desc="Epochs"):
         # ========== 训练阶段 ==========
         model.train()
-        for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]", leave=False)
+        for batch in train_pbar:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            token_type_ids = batch['token_type_ids'].to(device)
+            concept_vector = batch['concept_vector'].to(device)
+            labels = batch['labels'].to(device)
+
             optimizer.zero_grad()
-            outputs = model(batch_x)
-            loss = criterion(outputs, batch_y)
+            outputs = model(input_ids, attention_mask, concept_vector, token_type_ids)
+            loss = criterion(outputs, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪，防止梯度爆炸
             optimizer.step()
             scheduler.step()
+            train_pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         # ========== 验证集评估 ==========
         model.eval()
         val_preds, val_labels_list = [], []
         total_val_loss = 0.0
         with torch.no_grad():
-            for val_x, val_y in val_loader:
-                val_x, val_y = val_x.to(device), val_y.to(device)
-                val_outputs = model(val_x)
-                v_loss = criterion(val_outputs, val_y)
+            for batch in tqdm(val_loader, desc=f"Epoch {epoch + 1} [Val]", leave=False):
+                outputs = model(
+                    batch['input_ids'].to(device),
+                    batch['attention_mask'].to(device),
+                    batch['concept_vector'].to(device),
+                    batch['token_type_ids'].to(device)
+                )
+                v_loss = criterion(outputs, batch['labels'].to(device))
                 total_val_loss += v_loss.item()
-                val_preds.extend(torch.argmax(val_outputs, dim=1).cpu().numpy())
-                val_labels_list.extend(val_y.cpu().numpy())
+                val_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
+                val_labels_list.extend(batch['labels'].numpy())
 
         avg_val_loss = total_val_loss / len(val_loader)
         val_f1 = f1_score(val_labels_list, val_preds, average='macro')
@@ -393,13 +437,17 @@ def train(config, train_dataset, val_dataset, test_dataset):
         test_preds, test_labels_list = [], []
         total_test_loss = 0.0
         with torch.no_grad():
-            for tx, ty in test_loader:
-                tx = tx.to(device)
-                t_outputs = model(tx)
-                t_loss = criterion(t_outputs, ty.to(device))
+            for batch in tqdm(test_loader, desc=f"Epoch {epoch + 1} [Test]", leave=False):
+                outputs = model(
+                    batch['input_ids'].to(device),
+                    batch['attention_mask'].to(device),
+                    batch['concept_vector'].to(device),
+                    batch['token_type_ids'].to(device)
+                )
+                t_loss = criterion(outputs, batch['labels'].to(device))
                 total_test_loss += t_loss.item()
-                test_preds.extend(torch.argmax(t_outputs, dim=1).cpu().numpy())
-                test_labels_list.extend(ty.numpy())
+                test_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
+                test_labels_list.extend(batch['labels'].numpy())
 
         avg_test_loss = total_test_loss / len(test_loader)
         test_f1 = f1_score(test_labels_list, test_preds, average='macro')
@@ -447,10 +495,10 @@ def evaluate(config, timestamp):
     从实验目录加载config.json恢复训练配置，加载最佳模型权重，
     在测试集上计算Precision/Recall/F1，并保存结果。
 
-    :param config: MLPConfig 配置对象（用于获取base_path）
+    :param config: DualChannelFusionConfig 配置对象（用于获取base_path）
     :param timestamp: 实验时间戳
     """
-    experiment_dir = config.base_path / "experiments" / timestamp
+    experiment_dir = config.base_path / "experiments_dual_channel_fusion" / timestamp
     if not experiment_dir.exists():
         raise FileNotFoundError(f"实验目录不存在: {experiment_dir}")
 
@@ -464,21 +512,22 @@ def evaluate(config, timestamp):
         set_reproducibility(saved_config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = BertTokenizer.from_pretrained(str(saved_config.bert_path))
 
     # 加载测试数据
-    test_x, test_y = load_data(saved_config, "test")
-    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=int(saved_config.batch_size), shuffle=False)
-
-    # 从概念向量文件中加载原始文本内容（逐条保存预测结果）
-    with open(saved_config.test_concept_path, "r", encoding="utf-8") as f:
-        raw_concept_data = json.load(f)
-    contents = [item["content"] for item in raw_concept_data]
+    test_texts, test_labels, test_concepts = load_data(saved_config, "test")
+    test_dataset = tokenize_and_build_dataset(
+        test_texts, test_labels, test_concepts, tokenizer, int(saved_config.max_seq_length)
+    )
+    test_loader = DataLoader(test_dataset, batch_size=int(saved_config.batch_size), shuffle=False)
 
     # 加载最佳模型
-    model = MLP(
-        in_features=test_x.shape[1],
-        dropout_rate=saved_config.dropout_rate,
-        hidden_features=saved_config.hidden_features
+    concept_dim = test_dataset.concept_vectors.shape[1]
+    model = DualChannelFusion(
+        bert_path=str(saved_config.bert_path),
+        concept_dim=concept_dim,
+        proj_dim=saved_config.proj_dim,
+        dropout_rate=saved_config.dropout_rate
     )
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
@@ -486,12 +535,15 @@ def evaluate(config, timestamp):
     # 推理
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for batch_x, batch_y in test_loader:
-            batch_x = batch_x.to(device)
-            outputs = model(batch_x)
-            preds = torch.argmax(outputs, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(batch_y.numpy())
+        for batch in test_loader:
+            outputs = model(
+                batch['input_ids'].to(device),
+                batch['attention_mask'].to(device),
+                batch['concept_vector'].to(device),
+                batch['token_type_ids'].to(device)
+            )
+            all_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
+            all_labels.extend(batch['labels'].numpy())
 
     # 计算指标
     f1 = f1_score(all_labels, all_preds, average='macro')
@@ -501,7 +553,7 @@ def evaluate(config, timestamp):
 
     # 输出到控制台
     print("\n" + "=" * 30)
-    print("      MLP 测试集评估结果")
+    print("      Fusion 测试集评估结果")
     print("=" * 30)
     print(f"精确率 (Precision - Macro): {precision:.4f}")
     print(f"召回率 (Recall - Macro):    {recall:.4f}")
@@ -524,7 +576,7 @@ def evaluate(config, timestamp):
 
     # 保存分类报告 TXT
     with open(test_results_dir / "classification_report.txt", "w", encoding="utf-8") as f:
-        f.write("MLP 测试集评估结果\n")
+        f.write("Fusion 测试集评估结果\n")
         f.write("=" * 30 + "\n")
         f.write(f"精确率 (Precision - Macro): {precision:.4f}\n")
         f.write(f"召回率 (Recall - Macro):    {recall:.4f}\n")
@@ -540,7 +592,7 @@ def evaluate(config, timestamp):
     for i in range(len(all_preds)):
         predictions.append({
             "index": i,
-            "content": contents[i],
+            "content": test_texts[i],
             "true_label": int(all_labels[i]),
             "true_label_name": label_names[int(all_labels[i])],
             "pred_label": int(all_preds[i]),
@@ -553,14 +605,14 @@ def evaluate(config, timestamp):
 
 def main():
     """
-    参数加载逻辑：训练模式基于MLP_config.py，使用命令行参数更新配置，并保存到config.json中
+    参数加载逻辑：训练模式基于dual_channel_fusion_config.py，使用命令行参数更新配置，并保存到config.json中
     测试模式从实验目录的config.json中加载参数配置
     """
     args = parse_args()
 
     if args.mode in ['all', 'train']:
         # 获取完整参数配置
-        config = update_MLPConfig(args)
+        config = update_DualChannelFusionConfig(args)
 
         # 生成时间戳并创建实验目录
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -575,20 +627,23 @@ def main():
             "dataset_name": config.dataset_name,
             "model_name": config.model_name,
             "template": config.template,
+            "train_path": str(config.train_path),
+            "test_path": str(config.test_path),
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
+            "raw_data_path": str(config.raw_data_path),
             "processed_path": str(config.processed_path),
+            "bert_path": str(config.bert_path),
             "seed": config.seed,
             "use_deterministic": config.use_deterministic,
             "batch_size": config.batch_size,
             "epochs": config.epochs,
-            "max_lr": config.max_lr,
-            "pct_start": config.pct_start,
-            "div_factor": config.div_factor,
-            "final_div_factor": config.final_div_factor,
-            "anneal_strategy": config.anneal_strategy,
+            "learning_rate": config.learning_rate,
+            "warmup_ratio": config.warmup_ratio,
+            "weight_decay": config.weight_decay,
+            "max_seq_length": config.max_seq_length,
             "dropout_rate": config.dropout_rate,
-            "hidden_features": config.hidden_features,
+            "proj_dim": config.proj_dim,
             "patience": config.patience
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
@@ -603,24 +658,26 @@ def main():
         else:
             print(">>> 已禁用确定性模式 (Randomness Enabled), 结果将不可复现")
 
-        # 加载数据
-        train_x, train_y = load_data(config, "train")
-        test_x, test_y = load_data(config, "test")
+        # 加载tokenizer和数据
+        tokenizer = BertTokenizer.from_pretrained(str(config.bert_path))
+        train_texts, train_labels, train_concepts = load_data(config, "train")
+        test_texts, test_labels, test_concepts = load_data(config, "test")
 
         # 从训练集中按9:1比例划分验证集（分层抽样）
-        train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
-            train_x.numpy(), train_y.numpy(),
-            test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
+        train_texts_split, val_texts_split, train_labels_split, val_labels_split, train_concepts_split, val_concepts_split = train_test_split(
+            train_texts, train_labels, train_concepts,
+            test_size=0.1, stratify=train_labels, random_state=config.seed
         )
-        train_dataset = TensorDataset(
-            torch.tensor(train_x_np, dtype=torch.float32),
-            torch.tensor(train_y_np, dtype=torch.long)
+
+        train_dataset = tokenize_and_build_dataset(
+            train_texts_split, train_labels_split, train_concepts_split, tokenizer, config.max_seq_length
         )
-        val_dataset = TensorDataset(
-            torch.tensor(val_x_np, dtype=torch.float32),
-            torch.tensor(val_y_np, dtype=torch.long)
+        val_dataset = tokenize_and_build_dataset(
+            val_texts_split, val_labels_split, val_concepts_split, tokenizer, config.max_seq_length
         )
-        test_dataset = TensorDataset(test_x, test_y)
+        test_dataset = tokenize_and_build_dataset(
+            test_texts, test_labels, test_concepts, tokenizer, config.max_seq_length
+        )
 
         print(f">>> 训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
 
@@ -638,7 +695,7 @@ def main():
         if not args.timestamp:
             print("错误: 测试模式必须指定 --timestamp")
             sys.exit(1)
-        config = MLPConfig()
+        config = DualChannelFusionConfig()
         evaluate(config, args.timestamp)
 
 
