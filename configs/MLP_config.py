@@ -27,7 +27,7 @@ class MLPConfig():
         self.anneal_strategy = 'cos'  # Warmup 后余弦衰减
 
         # ========== MLP 模型参数 ==========
-        self.dropout_rate = 0.3  # Dropout 比率
+        self.dropout_rate = 0.5  # Dropout 比率
         self.hidden_features = 96  # 隐藏层特征维度
         self.patience = 20  # 早停耐心值 (验证集F1连续patience个epoch未提升则停止训练)
 

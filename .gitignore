@@ -57,7 +57,7 @@ develop-eggs/
 # Models (large files)
 models/bert-base-chinese/
 models/Qwen2.5-*/
-models/Deepseek-*/
+models/DeepSeek-*/
 .trae/
 .workbuddy/
 docs/
