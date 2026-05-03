@@ -132,7 +132,7 @@ def parse_args():
         epilog="""
 使用示例:
   # 完整流水线 (训练+测试)
-  python dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
+  python utils/dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
 
   # 仅训练
   python dual_channel_fusion_pipeline.py --mode train --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
@@ -374,7 +374,7 @@ def train(config, train_dataset, val_dataset, test_dataset):
     bert_params = list(model.bert.named_parameters())
     projection_params = (
         list(model.concept_proj.named_parameters()) +
-        list(model.concept_gate.named_parameters()) +
+        list(model.layer_gates.named_parameters()) +
         list(model.layer_norm.named_parameters())
     )
     classifier_params = list(model.classifier.named_parameters())

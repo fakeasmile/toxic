@@ -180,6 +180,8 @@ def parse_args():
 
     # 模型结构参数
     parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
+    parser.add_argument('--use_focal_loss', action='store_true', default=None, help='是否使用Focal Loss')
+    parser.add_argument('--focal_gamma', type=float, default=None, help='Focal Loss gamma参数')
 
     return parser.parse_args()
 
@@ -229,6 +231,10 @@ def update_ConceptGuidedAttentionConfig(args):
     # 模型结构参数
     if args.dropout_rate is not None:
         config.dropout_rate = args.dropout_rate
+    if args.use_focal_loss is not None:
+        config.use_focal_loss = args.use_focal_loss
+    if args.focal_gamma is not None:
+        config.focal_gamma = args.focal_gamma
 
     return config
 
@@ -360,9 +366,34 @@ def train(config, train_dataset, val_dataset, test_dataset):
         dropout_rate=config.dropout_rate
     ).to(device)
 
-    # 损失函数、优化器、学习率调度器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    # 损失函数
+    if config.use_focal_loss:
+        from utils.focal_loss import FocalLoss
+        criterion = FocalLoss(gamma=config.focal_gamma)
+        print(f">>> 使用Focal Loss (gamma={config.focal_gamma})")
+    else:
+        criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        print(f">>> 使用CrossEntropy + 标签平滑 (smoothing={config.label_smoothing})")
+
+    # 分层学习率优化器
+    # BERT层使用较低学习率，投影层和分类头使用较高学习率
+    bert_params = list(model.bert.named_parameters())
+    projection_params = (
+        list(model.concept_proj.named_parameters()) +
+        list(model.layer_gates.named_parameters()) +
+        list(model.layer_weights.named_parameters()) +
+        list(model.layer_norm.named_parameters())
+    )
+    classifier_params = list(model.classifier.named_parameters())
+
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in bert_params], 'lr': config.bert_learning_rate, 'weight_decay': config.weight_decay},
+        {'params': [p for n, p in projection_params], 'lr': config.projection_learning_rate, 'weight_decay': config.weight_decay},
+        {'params': [p for n, p in classifier_params], 'lr': config.projection_learning_rate, 'weight_decay': config.weight_decay},
+    ]
+
+    optimizer = optim.AdamW(optimizer_grouped_parameters)
+    print(f">>> 分层学习率: BERT={config.bert_learning_rate}, Projection/Classifier={config.projection_learning_rate}")
 
     total_steps = len(train_loader) * config.epochs
     warmup_steps = int(total_steps * config.warmup_ratio)
@@ -632,11 +663,16 @@ def main():
             "batch_size": config.batch_size,
             "epochs": config.epochs,
             "learning_rate": config.learning_rate,
+            "bert_learning_rate": config.bert_learning_rate,
+            "projection_learning_rate": config.projection_learning_rate,
             "warmup_ratio": config.warmup_ratio,
             "weight_decay": config.weight_decay,
             "max_seq_length": config.max_seq_length,
             "dropout_rate": config.dropout_rate,
-            "patience": config.patience
+            "patience": config.patience,
+            "label_smoothing": config.label_smoothing,
+            "use_focal_loss": config.use_focal_loss,
+            "focal_gamma": config.focal_gamma
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)

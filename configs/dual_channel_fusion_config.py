@@ -16,7 +16,7 @@ class DualChannelFusionConfig():
 
         # ========== BERT 训练超参数 ==========
         self.batch_size = 16  # 批次大小
-        self.epochs = 15  # 训练轮数（增加以充分利用早停）
+        self.epochs = 5  # 训练轮数 (用户要求不可修改)
         self.learning_rate = 2e-5  # 基础学习率
         self.bert_learning_rate = 1e-5  # BERT层学习率（更低，保护预训练知识）
         self.projection_learning_rate = 1e-4  # 投影层学习率（更高，快速适应）
