@@ -115,20 +115,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="MLP 训练与测试统一流水线",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-    使用示例:
-  # 完整流水线 (训练+测试)
-  python mlp_pipeline.py --mode all
-  
-  # 仅训练
-  python mlp_pipeline.py --mode train
-  
-  # 仅测试
-  python mlp_pipeline.py --mode test --timestamp 20260415-085433
-  
-  # 自定义超参数
-  python mlp_pipeline.py --mode all --dataset_name COLD --epochs 100 --hidden_features 128
-        """
+        epilog=""""""
     )
 
     # 运行模式

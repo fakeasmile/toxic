@@ -129,20 +129,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="双通道融合模型 训练与测试统一流水线",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-使用示例:
-  # 完整流水线 (训练+测试)
-  python utils/dual_channel_fusion_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
-
-  # 仅训练
-  python dual_channel_fusion_pipeline.py --mode train --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
-
-  # 仅测试
-  python dual_channel_fusion_pipeline.py --mode test --timestamp 20260415-085433 --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
-
-  # 自定义超参数
-  python dual_channel_fusion_pipeline.py --mode all --dataset_name COLD --model_name Qwen2.5-3B-Instruct --template binary --epochs 10 --dropout_rate 0.3
-        """
+        epilog=""""""
     )
 
     # 运行模式
