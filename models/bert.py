@@ -35,10 +35,11 @@ class BERTBaseline(nn.Module):
 class DualChannelFusion(nn.Module):
     """
     双通道融合模型（BERT语义通道 + 形容词概念向量通道）。
-    改进版：BERT不降维 + Sigmoid门控 + 残差连接 + LayerNorm。
+    改进版：BERT不降维 + 残差连接 + LayerNorm。
     结构: BERT → [CLS] (768维) ──┐
-                                  ├→ Sigmoid门控 → 残差连接 → LayerNorm → 分类头
-          概念向量 → 投影 (768维) ─┘
+                                  ├→ 残差连接: H(x) = x + F(x) → LayerNorm → 分类头
+          概念向量 → 投影 → 门控 →┘
+    其中 x = BERT输出, F(x) = 门控后的概念向量
     全参数微调BERT，使用分层学习率。
     """
 
@@ -51,12 +52,11 @@ class DualChannelFusion(nn.Module):
         """
         super(DualChannelFusion, self).__init__()
 
-        # ========== BERT语义通道 ==========
+        # ========== BERT语义通道（作为残差连接的identity） ==========
         self.bert = BertModel.from_pretrained(bert_path)
-        # BERT输出保持768维，不降维
-        self.bert_gate = nn.Linear(768, 768)  # Sigmoid门控，独立控制每个维度
+        # BERT输出保持768维，不降维，直接作为x
 
-        # ========== 概念向量通道 ==========
+        # ========== 概念向量通道（作为残差连接的F(x)） ==========
         self.concept_proj = nn.Sequential(
             nn.Linear(concept_dim, proj_dim),
             nn.LayerNorm(proj_dim),
@@ -78,19 +78,17 @@ class DualChannelFusion(nn.Module):
         :param token_type_ids: 句子类型ID
         :return: 分类logits
         """
-        # BERT通道：[CLS] → Sigmoid门控
+        # BERT通道：[CLS] 作为identity (x)
         bert_out = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
-        cls_output = bert_out.pooler_output  # [B, 768]
-        bert_gate_weights = torch.sigmoid(self.bert_gate(cls_output))  # [B, 768]
-        bert_feat = cls_output * bert_gate_weights  # [B, 768]
+        cls_output = bert_out.pooler_output  # [B, 768]  ← 这是x
 
-        # 概念向量通道：投影 → Sigmoid门控
+        # 概念向量通道：投影 → Sigmoid门控 作为F(x)
         concept_proj = self.concept_proj(concept_vector)  # [B, 768]
         concept_gate_weights = torch.sigmoid(self.concept_gate(concept_proj))  # [B, 768]
-        concept_feat = concept_proj * concept_gate_weights  # [B, 768]
+        concept_feat = concept_proj * concept_gate_weights  # [B, 768]  ← 这是F(x)
 
-        # 残差连接融合：BERT + 概念向量
-        fused = bert_feat + concept_feat  # [B, 768]
+        # 真正的残差连接: H(x) = x + F(x)
+        fused = cls_output + concept_feat  # [B, 768]
 
         # LayerNorm + Dropout
         fused = self.layer_norm(fused)

@@ -373,7 +373,6 @@ def train(config, train_dataset, val_dataset, test_dataset):
     # BERT层使用较低学习率，投影层和分类头使用较高学习率
     bert_params = list(model.bert.named_parameters())
     projection_params = (
-        list(model.bert_gate.named_parameters()) +
         list(model.concept_proj.named_parameters()) +
         list(model.concept_gate.named_parameters()) +
         list(model.layer_norm.named_parameters())

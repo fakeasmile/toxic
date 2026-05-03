@@ -26,9 +26,9 @@ class DualChannelFusionConfig():
 
         # ========== 融合模型参数 ==========
         self.dropout_rate = 0.3  # Dropout 比率
-        self.patience = 5  # 早停耐心值（增加，允许更多探索）
+        self.patience = 2  # 早停耐心值
         self.label_smoothing = 0.1  # 标签平滑系数
-        self.use_focal_loss = False  # 是否使用Focal Loss
+        self.use_focal_loss = True  # 是否使用Focal Loss
         self.focal_gamma = 2.0  # Focal Loss gamma参数
 
     def __repr__(self):
