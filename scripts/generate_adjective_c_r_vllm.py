@@ -176,7 +176,7 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
     ]
     return messages
 
-def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, template, tokenizer, llm_model, threshold=1e-4):
+def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, template, temperature, tokenizer, llm_model, threshold=1e-4):
     # 根据模板类型定义verbalizer token（首token id集合）和提示词指令
     if template in ["binary", "ICL"]:
         # verbalizer tokens
@@ -263,11 +263,11 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
             # 手动应用temperature（vLLM的logprobs返回原始概率，不受temperature影响）
-            if args.temperature > 0:
+            if temperature > 0:
                 # 反推logits（log(p) = logit - log(sum(exp(logits)))，在同一组内归一化常数相同）
                 logits = {tid: math.log(p + 1e-10) for tid, p in probs_dict.items()}
                 # 应用temperature
-                adjusted_logits = {tid: l / args.temperature for tid, l in logits.items()}
+                adjusted_logits = {tid: l / temperature for tid, l in logits.items()}
                 # 重新softmax
                 max_logit = max(adjusted_logits.values())
                 exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
@@ -375,7 +375,7 @@ def main():
     print("=" * 60 + "\n")
 
     tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization, args.quantization)
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.template, tokenizer, llm_model, threshold=1e-4)
+    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.template, args.temperature, tokenizer, llm_model, threshold=1e-4)
 
     print("生成完成")
 
