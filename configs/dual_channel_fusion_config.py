@@ -16,16 +16,20 @@ class DualChannelFusionConfig():
 
         # ========== BERT 训练超参数 ==========
         self.batch_size = 16  # 批次大小
-        self.epochs = 5  # 训练轮数
-        self.learning_rate = 2e-5  # 学习率
+        self.epochs = 15  # 训练轮数（增加以充分利用早停）
+        self.learning_rate = 2e-5  # 基础学习率
+        self.bert_learning_rate = 1e-5  # BERT层学习率（更低，保护预训练知识）
+        self.projection_learning_rate = 1e-4  # 投影层学习率（更高，快速适应）
         self.warmup_ratio = 0.1  # Warmup 占总训练步数的比例
         self.weight_decay = 0.01  # 权重衰减（L2正则化）
         self.max_seq_length = 128  # 最大序列长度
 
         # ========== 融合模型参数 ==========
-        self.proj_dim = 128  # 两个通道投影到的统一维度
-        self.dropout_rate = 0.5  # Dropout 比率
-        self.patience = 2  # 早停耐心值 (验证集F1连续patience个epoch未提升则停止训练)
+        self.dropout_rate = 0.3  # Dropout 比率
+        self.patience = 5  # 早停耐心值（增加，允许更多探索）
+        self.label_smoothing = 0.1  # 标签平滑系数
+        self.use_focal_loss = False  # 是否使用Focal Loss
+        self.focal_gamma = 2.0  # Focal Loss gamma参数
 
     def __repr__(self):
         """返回配置对象的字符串表示，包含所有配置项"""

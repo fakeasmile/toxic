@@ -35,49 +35,40 @@ class BERTBaseline(nn.Module):
 class DualChannelFusion(nn.Module):
     """
     双通道融合模型（BERT语义通道 + 形容词概念向量通道）。
-    结构: BERT → [CLS]投影 → bert_feat ─┐
-                                         ├→ 门控融合 → 分类头
-          概念向量 → sigmoid门控 → 投影 → concept_feat ─┘
-    全参数微调BERT，概念向量通道保留门控机制。
+    改进版：BERT不降维 + Sigmoid门控 + 残差连接 + LayerNorm。
+    结构: BERT → [CLS] (768维) ──┐
+                                  ├→ Sigmoid门控 → 残差连接 → LayerNorm → 分类头
+          概念向量 → 投影 (768维) ─┘
+    全参数微调BERT，使用分层学习率。
     """
 
-    def __init__(self, bert_path, concept_dim, proj_dim=128, dropout_rate=0.3):
+    def __init__(self, bert_path, concept_dim, proj_dim=768, dropout_rate=0.3):
         """
         :param bert_path: bert-base-chinese 模型路径
         :param concept_dim: 概念向量维度（由形容词词典大小决定，从数据中自动推断）
-        :param proj_dim: 两个通道投影到的统一维度
+        :param proj_dim: 投影维度，默认768（与BERT输出一致，不降维）
         :param dropout_rate: Dropout比率
         """
         super(DualChannelFusion, self).__init__()
 
         # ========== BERT语义通道 ==========
         self.bert = BertModel.from_pretrained(bert_path)
-        self.bert_proj = nn.Sequential(
-            nn.Linear(768, proj_dim),
-            nn.LayerNorm(proj_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-        )
+        # BERT输出保持768维，不降维
+        self.bert_gate = nn.Linear(768, 768)  # Sigmoid门控，独立控制每个维度
 
         # ========== 概念向量通道 ==========
-        self.gate_layer = nn.Linear(concept_dim, concept_dim)  # 门控单元，学习每个形容词维度的重要性权重 (0-1)
         self.concept_proj = nn.Sequential(
             nn.Linear(concept_dim, proj_dim),
             nn.LayerNorm(proj_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
         )
+        self.concept_gate = nn.Linear(proj_dim, proj_dim)  # Sigmoid门控，独立控制每个维度
 
-        # ========== 门控融合 ==========
-        self.fusion_gate = nn.Linear(2 * proj_dim, 2)  # 输出2维权重，分别对应BERT通道和概念向量通道
-
-        # ========== 分类头 ==========
-        self.classifier = nn.Sequential(
-            nn.Linear(2 * proj_dim, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(64, 2),
-        )
+        # ========== 融合与分类 ==========
+        self.layer_norm = nn.LayerNorm(proj_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.classifier = nn.Linear(proj_dim, 2)
 
     def forward(self, input_ids, attention_mask, concept_vector, token_type_ids=None):
         """
@@ -87,22 +78,23 @@ class DualChannelFusion(nn.Module):
         :param token_type_ids: 句子类型ID
         :return: 分类logits
         """
-        # BERT通道：[CLS] → 投影
+        # BERT通道：[CLS] → Sigmoid门控
         bert_out = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
-        cls_output = bert_out.pooler_output
-        bert_feat = self.bert_proj(cls_output)
+        cls_output = bert_out.pooler_output  # [B, 768]
+        bert_gate_weights = torch.sigmoid(self.bert_gate(cls_output))  # [B, 768]
+        bert_feat = cls_output * bert_gate_weights  # [B, 768]
 
-        # 概念向量通道：sigmoid门控 → 投影
-        gate_weights = torch.sigmoid(self.gate_layer(concept_vector))
-        gated_concept = concept_vector * gate_weights
-        concept_feat = self.concept_proj(gated_concept)
+        # 概念向量通道：投影 → Sigmoid门控
+        concept_proj = self.concept_proj(concept_vector)  # [B, 768]
+        concept_gate_weights = torch.sigmoid(self.concept_gate(concept_proj))  # [B, 768]
+        concept_feat = concept_proj * concept_gate_weights  # [B, 768]
 
-        # 门控融合：拼接 → softmax → 加权
-        concat_feat = torch.cat([bert_feat, concept_feat], dim=-1)
-        gate_scores = torch.softmax(self.fusion_gate(concat_feat), dim=-1)
-        bert_weighted = bert_feat * gate_scores[:, 0:1]
-        concept_weighted = concept_feat * gate_scores[:, 1:2]
-        fused = torch.cat([bert_weighted, concept_weighted], dim=-1)
+        # 残差连接融合：BERT + 概念向量
+        fused = bert_feat + concept_feat  # [B, 768]
+
+        # LayerNorm + Dropout
+        fused = self.layer_norm(fused)
+        fused = self.dropout(fused)
 
         # 分类
         logits = self.classifier(fused)

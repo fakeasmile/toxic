@@ -21,8 +21,7 @@
         --batch_size 16
         --epochs 5
         --max_seq_length 128
-        --dropout_rate 0.5
-        --proj_dim 128
+        --dropout_rate 0.3
         --patience 2
         --use_deterministic
         --seed 42
@@ -53,8 +52,7 @@
         --patience          早停耐心值 (验证集F1连续patience个epoch未提升则停止, 默认: 2)
 
     融合模型结构参数:
-        --dropout_rate      Dropout比率 (默认: 0.5)
-        --proj_dim          投影维度 (默认: 128)
+        --dropout_rate      Dropout比率 (默认: 0.3)
 
 参数优先级:
     - 训练模式: 命令行参数 > DualChannelFusionConfig默认值（命令行参数覆盖DualChannelFusionConfig参数）
@@ -143,7 +141,7 @@ def parse_args():
   python dual_channel_fusion_pipeline.py --mode test --timestamp 20260415-085433 --dataset_name TOXICN --model_name Qwen2.5-3B-Instruct --template likert
 
   # 自定义超参数
-  python dual_channel_fusion_pipeline.py --mode all --dataset_name COLD --model_name Qwen2.5-3B-Instruct --template binary --epochs 10 --proj_dim 256
+  python dual_channel_fusion_pipeline.py --mode all --dataset_name COLD --model_name Qwen2.5-3B-Instruct --template binary --epochs 10 --dropout_rate 0.3
         """
     )
 
@@ -182,7 +180,6 @@ def parse_args():
 
     # 融合模型结构参数
     parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
-    parser.add_argument('--proj_dim', type=int, default=None, help='投影维度')
 
     return parser.parse_args()
 
@@ -232,8 +229,6 @@ def update_DualChannelFusionConfig(args):
     # 融合模型结构参数
     if args.dropout_rate is not None:
         config.dropout_rate = args.dropout_rate
-    if args.proj_dim is not None:
-        config.proj_dim = args.proj_dim
 
     return config
 
@@ -362,13 +357,37 @@ def train(config, train_dataset, val_dataset, test_dataset):
     model = DualChannelFusion(
         bert_path=str(config.bert_path),
         concept_dim=concept_dim,
-        proj_dim=config.proj_dim,
         dropout_rate=config.dropout_rate
     ).to(device)
 
-    # 损失函数、优化器、学习率调度器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    # 损失函数
+    if config.use_focal_loss:
+        from utils.focal_loss import FocalLoss
+        criterion = FocalLoss(gamma=config.focal_gamma)
+        print(f">>> 使用Focal Loss (gamma={config.focal_gamma})")
+    else:
+        criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        print(f">>> 使用CrossEntropy + 标签平滑 (smoothing={config.label_smoothing})")
+
+    # 分层学习率优化器
+    # BERT层使用较低学习率，投影层和分类头使用较高学习率
+    bert_params = list(model.bert.named_parameters())
+    projection_params = (
+        list(model.bert_gate.named_parameters()) +
+        list(model.concept_proj.named_parameters()) +
+        list(model.concept_gate.named_parameters()) +
+        list(model.layer_norm.named_parameters())
+    )
+    classifier_params = list(model.classifier.named_parameters())
+
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in bert_params], 'lr': config.bert_learning_rate, 'weight_decay': config.weight_decay},
+        {'params': [p for n, p in projection_params], 'lr': config.projection_learning_rate, 'weight_decay': config.weight_decay},
+        {'params': [p for n, p in classifier_params], 'lr': config.projection_learning_rate, 'weight_decay': config.weight_decay},
+    ]
+
+    optimizer = optim.AdamW(optimizer_grouped_parameters)
+    print(f">>> 分层学习率: BERT={config.bert_learning_rate}, Projection/Classifier={config.projection_learning_rate}")
 
     total_steps = len(train_loader) * config.epochs
     warmup_steps = int(total_steps * config.warmup_ratio)
@@ -526,7 +545,6 @@ def evaluate(config, timestamp):
     model = DualChannelFusion(
         bert_path=str(saved_config.bert_path),
         concept_dim=concept_dim,
-        proj_dim=saved_config.proj_dim,
         dropout_rate=saved_config.dropout_rate
     )
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
@@ -639,12 +657,16 @@ def main():
             "batch_size": config.batch_size,
             "epochs": config.epochs,
             "learning_rate": config.learning_rate,
+            "bert_learning_rate": config.bert_learning_rate,
+            "projection_learning_rate": config.projection_learning_rate,
             "warmup_ratio": config.warmup_ratio,
             "weight_decay": config.weight_decay,
             "max_seq_length": config.max_seq_length,
             "dropout_rate": config.dropout_rate,
-            "proj_dim": config.proj_dim,
-            "patience": config.patience
+            "patience": config.patience,
+            "label_smoothing": config.label_smoothing,
+            "use_focal_loss": config.use_focal_loss,
+            "focal_gamma": config.focal_gamma
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)
