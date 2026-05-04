@@ -17,6 +17,6 @@ class BERTBaseline(nn.Module):
 
     def forward(self, input_ids, attention_mask, token_type_ids=None):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
-        cls_output = outputs.pooler_output
+        cls_output = outputs.last_hidden_state[:, 0, :]
         logits = self.classifier(self.dropout(cls_output))
         return logits

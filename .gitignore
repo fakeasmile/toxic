@@ -58,6 +58,7 @@ develop-eggs/
 models/bert-base-chinese/
 models/Qwen2.5-*/
 models/DeepSeek-*/
+models/chinese-roberta-*/
 .trae/
 .workbuddy/
 docs/

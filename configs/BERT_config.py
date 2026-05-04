@@ -6,7 +6,7 @@ class BERTConfig():
         # ========== 路径相关配置 ==========
         self.base_path = Path(__file__).parent.parent  # 基目录
         self.raw_data_path = self.base_path / "data" / "raw"  # 原始数据根目录
-        self.bert_path = self.base_path / "models" / "bert-base-chinese"  # bert-base-chinese 模型路径
+        self.bert_path = self.base_path / "models" / "chinese-roberta-wwm-ext"  # chinese-roberta-wwm-ext 模型路径
         self.experiment_path = self.base_path / "experiments_bert"  # 实验结果保存目录
 
         # ========== 随机种子配置 ==========
