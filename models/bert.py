@@ -22,203 +22,76 @@ class BERTBaseline(nn.Module):
         return logits
 
 
-class DualChannelFusion(nn.Module):
+class BERTMultiTask(nn.Module):
     """
-    双通道融合模型（BERT语义通道 + 形容词概念向量通道）。
-    
-    核心设计：概念向量作为BERT的"语义增强器"，逐层与BERT交互。
-    
+    BERT多任务学习模型。
+
+    核心设计：概念向量不作为输入特征，而是作为辅助训练目标。
+    BERT同时学习两个任务：
+    1. 主任务：毒性分类（二分类）
+    2. 辅助任务：概念向量预测（回归）
+
+    通过多任务学习，概念信息作为正则化信号引导BERT的内部表示，
+    让BERT学到更有结构的语义表示。
+
     结构:
-        BERT → 逐层隐藏状态 [num_layers, B, seq_len, 768]
+        BERT → [CLS] [B, 768]
                   │
-                  ├──► 每层与概念向量交互 ──► 增强后的隐藏状态
+                  ├──► 分类头 ──► 毒性标签 (主任务)
                   │
-        概念向量 ─┴──► 投影到768维 ──► 生成逐层增强信号
-                  
-        最终[CLS] → LayerNorm → Dropout → 分类
-    
-    特点：
-    - 概念向量不直接参与分类，而是增强BERT的语义表示
-    - 逐层交互让BERT的每一层都能感知有害概念
-    - 残差连接保留BERT原始能力
+                  └──► 概念预测头 ──► 概念向量 (辅助任务)
+
+    损失函数:
+        L = L_cls + λ * L_concept
+        L_cls: 交叉熵损失（毒性分类）
+        L_concept: MSE损失（概念向量预测）
+        λ: 概念损失权重（控制辅助任务的影响）
     """
 
-    def __init__(self, bert_path, concept_dim, dropout_rate=0.3):
-        super(DualChannelFusion, self).__init__()
+    def __init__(self, bert_path, concept_dim, dropout_rate=0.1, concept_loss_weight=0.1):
+        super(BERTMultiTask, self).__init__()
+
+        self.concept_dim = concept_dim
+        self.concept_loss_weight = concept_loss_weight
 
         # BERT
         self.bert = BertModel.from_pretrained(bert_path)
-        self.num_layers = self.bert.config.num_hidden_layers
 
-        # 概念向量投影：将概念向量投影到与BERT隐藏状态相同的维度
-        self.concept_proj = nn.Sequential(
-            nn.Linear(concept_dim, 768),
-            nn.LayerNorm(768),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-        )
-
-        # 逐层交互门控：为每一层生成一个门控信号
-        self.layer_gates = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(768 * 2, 768),
-                nn.Sigmoid(),
-            ) for _ in range(self.num_layers)
-        ])
-
-        # 输出层
-        self.layer_norm = nn.LayerNorm(768)
+        # 主任务：毒性分类
         self.dropout = nn.Dropout(dropout_rate)
         self.classifier = nn.Linear(768, 2)
 
-    def forward(self, input_ids, attention_mask, concept_vector, token_type_ids=None):
-        # 获取BERT所有隐藏层
-        outputs = self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            output_hidden_states=True,
-        )
-        hidden_states = outputs.hidden_states[1:]  # [num_layers, B, seq_len, 768]
-
-        # 投影概念向量
-        concept_feat = self.concept_proj(concept_vector)  # [B, 768]
-
-        # 逐层交互：每层BERT输出与概念向量融合
-        enhanced_states = []
-        for i, hidden_state in enumerate(hidden_states):
-            # hidden_state: [B, seq_len, 768]
-            # concept_feat: [B, 768]
-            
-            # 将概念向量扩展到与hidden_state相同的seq_len
-            concept_expanded = concept_feat.unsqueeze(1).expand(-1, hidden_state.size(1), -1)  # [B, seq_len, 768]
-            
-            # 拼接后生成门控
-            concat = torch.cat([hidden_state, concept_expanded], dim=-1)  # [B, seq_len, 1536]
-            gate = self.layer_gates[i](concat)  # [B, seq_len, 768]
-            
-            # 门控融合：保留BERT信息，增强概念相关部分
-            enhanced = hidden_state + gate * concept_expanded  # [B, seq_len, 768]
-            enhanced_states.append(enhanced)
-
-        # 使用最后一层的[CLS]进行分类
-        final_cls = enhanced_states[-1][:, 0, :]  # [B, 768]
-
-        # LayerNorm + Dropout + 分类
-        final_cls = self.layer_norm(final_cls)
-        final_cls = self.dropout(final_cls)
-        logits = self.classifier(final_cls)
-        return logits
-
-
-class ConceptGuidedBERT(nn.Module):
-    """
-    概念引导的BERT模型。
-
-    核心设计：概念向量作为语义增强信号，通过门控机制与BERT各层交互，
-    并动态调整每层的重要性权重。
-
-    结构:
-        BERT → 所有隐藏层 [num_layers, B, seq_len, 768]
-                  │
-                  ├──► 每层与概念增强信号交互
-                  │
-        概念向量 ─┴──► 投影到768维 ──► 生成逐层增强信号
-                         │
-                         └──► 层权重生成器 ──► 动态加权各层
-
-        最终[CLS] → LayerNorm → 与概念向量拼接 → 分类
-
-    特点：
-    - 概念向量投影到BERT维度，与每层隐藏状态逐元素交互
-    - 层权重动态调整，让模型自动学习哪层BERT输出更重要
-    - 最终拼接保留原始概念信息，增强分类能力
-    """
-
-    def __init__(self, bert_path, concept_dim, dropout_rate=0.3):
-        super(ConceptGuidedBERT, self).__init__()
-
-        # BERT
-        self.bert = BertModel.from_pretrained(bert_path)
-        self.num_layers = self.bert.config.num_hidden_layers
-
-        # 概念向量投影：将概念向量投影到与BERT隐藏状态相同的维度
-        self.concept_proj = nn.Sequential(
-            nn.Linear(concept_dim, 768),
-            nn.LayerNorm(768),
+        # 辅助任务：概念向量预测
+        self.concept_head = nn.Sequential(
+            nn.Linear(768, 384),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
+            nn.Linear(384, concept_dim),
         )
 
-        # 逐层门控：为每一层生成一个门控信号
-        self.layer_gates = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(768 * 2, 768),
-                nn.Sigmoid(),
-            ) for _ in range(self.num_layers)
-        ])
+    def forward(self, input_ids, attention_mask, labels=None, concept_vector=None, token_type_ids=None):
+        """
+        :param input_ids: [B, seq_len]
+        :param attention_mask: [B, seq_len]
+        :param labels: [B] 毒性标签 (0或1)
+        :param concept_vector: [B, concept_dim] 概念向量
+        :param token_type_ids: [B, seq_len]
+        :return: (loss, cls_logits, concept_pred)
+        """
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        cls_output = outputs.pooler_output
 
-        # 层权重生成器：决定每层BERT的重要性（使用softmax归一化）
-        self.layer_weights = nn.Sequential(
-            nn.Linear(concept_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.num_layers),
-        )
+        # 主任务：毒性分类
+        cls_logits = self.classifier(self.dropout(cls_output))
 
-        # 输出层
-        self.layer_norm = nn.LayerNorm(768)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.classifier = nn.Linear(768 + concept_dim, 2)
+        # 辅助任务：概念向量预测
+        concept_pred = self.concept_head(cls_output)
 
-    def forward(self, input_ids, attention_mask, concept_vector, token_type_ids=None):
-        # 投影概念向量
-        concept_feat = self.concept_proj(concept_vector)  # [B, 768]
+        # 计算损失
+        loss = None
+        if labels is not None and concept_vector is not None:
+            cls_loss = F.cross_entropy(cls_logits, labels)
+            concept_loss = F.mse_loss(concept_pred, concept_vector)
+            loss = cls_loss + self.concept_loss_weight * concept_loss
 
-        # 生成层权重 [B, num_layers]
-        layer_logits = self.layer_weights(concept_vector)  # [B, num_layers]
-        layer_weights = F.softmax(layer_logits, dim=-1)  # 归一化，和为1
-
-        # BERT前向传播
-        outputs = self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            output_hidden_states=True,
-        )
-        hidden_states = outputs.hidden_states[1:]  # [num_layers, B, seq_len, 768]
-
-        # 逐层交互：每层BERT输出与概念向量融合
-        enhanced_states = []
-        for i, hidden_state in enumerate(hidden_states):
-            # hidden_state: [B, seq_len, 768]
-            # concept_feat: [B, 768]
-
-            # 将概念向量扩展到与hidden_state相同的seq_len
-            concept_expanded = concept_feat.unsqueeze(1).expand(-1, hidden_state.size(1), -1)  # [B, seq_len, 768]
-
-            # 拼接后生成门控
-            concat = torch.cat([hidden_state, concept_expanded], dim=-1)  # [B, seq_len, 1536]
-            gate = self.layer_gates[i](concat)  # [B, seq_len, 768]
-
-            # 门控融合：保留BERT信息，增强概念相关部分
-            enhanced = hidden_state + gate * concept_expanded  # [B, seq_len, 768]
-            enhanced_states.append(enhanced)
-
-        # stack后按层权重加权求和: [B, num_layers, seq_len, 768]
-        stacked = torch.stack(enhanced_states, dim=1)  # [B, num_layers, seq_len, 768]
-        weights = layer_weights.unsqueeze(-1).unsqueeze(-1)  # [B, num_layers, 1, 1]
-        weighted_sum = (stacked * weights).sum(dim=1)  # [B, seq_len, 768]
-
-        # 取[CLS]位置
-        cls_output = weighted_sum[:, 0, :]  # [B, 768]
-
-        # LayerNorm + Dropout
-        cls_output = self.layer_norm(cls_output)
-        cls_output = self.dropout(cls_output)
-
-        # 与原始概念向量拼接
-        fused = torch.cat([cls_output, concept_vector], dim=-1)  # [B, 768 + concept_dim]
-
-        # 分类
-        logits = self.classifier(fused)
-        return logits
+        return loss, cls_logits, concept_pred
