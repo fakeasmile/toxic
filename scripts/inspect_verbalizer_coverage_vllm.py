@@ -65,8 +65,7 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 # ==================== CONFIG 区域（直接修改以下变量）====================
 MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 
-# 提示词模板类型，可选: "binary", "likert", "ICL"
-PROMPT_TEMPLATE = "likert"
+
 
 # 文本内容（直接修改即可）
 TEXT_CONTENT = "什么被害妄想猎巫man"
@@ -126,23 +125,12 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-def build_chat_messages(template, instruction, content, adj, adj_definition=""):
+def build_chat_messages(instruction, content, adj):
     """
-    根据模板类型构建Chat Template的messages列表。
+    构建Likert Chat Template的messages列表。
     与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    if template == "binary":
-        user_content = f"文本内容：{content}\n形容词：「{adj}」描述是否准确？回答： "
-    elif template == "likert":
-        user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
-    elif template == "ICL":
-        user_content = (
-            f"文本内容：{content}\n"
-            f"形容词「{adj}」的定义：{adj_definition}\n"
-            f"根据上述定义，该文本是否表现出该形容词「{adj}」所描述的特征？回答： "
-        )
-    else:
-        raise ValueError(f"不支持的模板类型: {template}")
+    user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -153,7 +141,6 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
 
 def analyze_verbalizer_coverage(
     text_content,
-    template,
     adjective_path,
     tokenizer,
     llm_model,
@@ -163,30 +150,17 @@ def analyze_verbalizer_coverage(
     """
     对单条文本遍历所有形容词，使用 vLLM 计算 verbalizer 概率总和并可视化。
     """
-    # 根据模板类型定义 verbalizer token 和提示词指令
-    if template in ["binary", "ICL"]:
-        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", " yes"]
-        negative_tokens = ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
-        affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer)
-        negative_ids = get_first_token_ids(negative_tokens, tokenizer)
-
-        if template == "binary":
-            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
-        elif template == "ICL":
-            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
-            definition = pd.read_csv(adjective_path)["definition"].tolist()
-
-    elif template == "likert":
-        likert_tokens = ["1", "2", "3", "4", "5"]
-        likert_ids = get_first_token_ids(likert_tokens, tokenizer)
-        instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
-                       "评估等级：\n"
-                       "1 = 完全不相关\n"
-                       "2 = 不太相关\n"
-                       "3 = 有点相关\n"
-                       "4 = 比较相关\n"
-                       "5 = 非常相关\n"
-                       "直接回答数字。")
+    # 定义Likert verbalizer token 和提示词指令
+    likert_tokens = ["1", "2", "3", "4", "5"]
+    likert_ids = get_first_token_ids(likert_tokens, tokenizer)
+    instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+                   "评估等级：\n"
+                   "1 = 完全不相关\n"
+                   "2 = 不太相关\n"
+                   "3 = 有点相关\n"
+                   "4 = 比较相关\n"
+                   "5 = 非常相关\n"
+                   "直接回答数字。")
 
     # 加载形容词词典
     adj_df = pd.read_csv(adjective_path)
@@ -205,11 +179,8 @@ def analyze_verbalizer_coverage(
 
     # 构建所有提示词
     prompts = []
-    for index, adj in enumerate(adjectives):
-        if template == "ICL":
-            messages = build_chat_messages(template, instruction, text_content, adj, definition[index])
-        else:
-            messages = build_chat_messages(template, instruction, text_content, adj)
+    for adj in adjectives:
+        messages = build_chat_messages(instruction, text_content, adj)
 
         prompt_text = tokenizer.apply_chat_template(
             messages,
@@ -239,43 +210,30 @@ def analyze_verbalizer_coverage(
             exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
             probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
 
-        if template in ["binary", "ICL"]:
-            pos_prob = sum(probs_dict.get(tid, 0.0) for tid in affirmative_ids)
-            neg_prob = sum(probs_dict.get(tid, 0.0) for tid in negative_ids)
-            total_prob = pos_prob + neg_prob
-            results.append({
-                "index": adj_idx,
-                "adjective_en": adj_en_list[adj_idx],
-                "adjective_cn": adjectives[adj_idx],
-                "pos_prob": round(pos_prob, 6),
-                "neg_prob": round(neg_prob, 6),
-                "total_prob": round(total_prob, 6),
-            })
-        elif template == "likert":
-            level_probs = [probs_dict.get(tid, 0.0) for tid in likert_ids]
-            total_prob = sum(level_probs)
-            # 计算概率最高的数字分数（1-5映射到0.0-1.0）
-            max_level_idx = level_probs.index(max(level_probs))
-            max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
-            # 计算加权期望likert分数（与generate_adjective_c_r_vllm.py一致）
-            weights = [0.0, 0.25, 0.5, 0.75, 1.0]
-            if total_prob > 0:
-                likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob
-            else:
-                likert_score = 0.0
-            results.append({
-                "index": adj_idx,
-                "adjective_en": adj_en_list[adj_idx],
-                "adjective_cn": adjectives[adj_idx],
-                "level_1_prob": round(level_probs[0], 6),
-                "level_2_prob": round(level_probs[1], 6),
-                "level_3_prob": round(level_probs[2], 6),
-                "level_4_prob": round(level_probs[3], 6),
-                "level_5_prob": round(level_probs[4], 6),
-                "total_prob": round(total_prob, 6),
-                "max_level_score": round(max_level_score, 6),
-                "likert_score": round(likert_score, 6),
-            })
+        level_probs = [probs_dict.get(tid, 0.0) for tid in likert_ids]
+        total_prob = sum(level_probs)
+        # 计算概率最高的数字分数（1-5映射到0.0-1.0）
+        max_level_idx = level_probs.index(max(level_probs))
+        max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
+        # 计算加权期望likert分数（与generate_adjective_c_r_vllm.py一致）
+        weights = [0.0, 0.25, 0.5, 0.75, 1.0]
+        if total_prob > 0:
+            likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob
+        else:
+            likert_score = 0.0
+        results.append({
+            "index": adj_idx,
+            "adjective_en": adj_en_list[adj_idx],
+            "adjective_cn": adjectives[adj_idx],
+            "level_1_prob": round(level_probs[0], 6),
+            "level_2_prob": round(level_probs[1], 6),
+            "level_3_prob": round(level_probs[2], 6),
+            "level_4_prob": round(level_probs[3], 6),
+            "level_5_prob": round(level_probs[4], 6),
+            "total_prob": round(total_prob, 6),
+            "max_level_score": round(max_level_score, 6),
+            "likert_score": round(likert_score, 6),
+        })
 
     # 保存JSON数据
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -300,34 +258,20 @@ def analyze_verbalizer_coverage(
     fig, ax = plt.subplots(figsize=(16, 6))
     x = [r["index"] for r in results]
 
-    if template in ["binary", "ICL"]:
-        pos_probs = [r["pos_prob"] for r in results]
-        neg_probs = [r["neg_prob"] for r in results]
-        total_probs = [r["total_prob"] for r in results]
+    total_probs = [r["total_prob"] for r in results]
+    max_level_scores = [r["max_level_score"] for r in results]
+    likert_scores = [r["likert_score"] for r in results]
+    ax.plot(x, total_probs, label="total_prob (Likert verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
+    ax.plot(x, max_level_scores, label="max_level_score (概率最高数字分数)", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
+    ax.plot(x, likert_scores, label="likert_score (加权期望分数)", color="green", alpha=0.8, linewidth=1.0, linestyle="-.")
 
-        ax.plot(x, pos_probs, label="pos_prob (肯定词概率)", color="green", alpha=0.7, linewidth=0.8)
-        ax.plot(x, neg_probs, label="neg_prob (否定词概率)", color="red", alpha=0.7, linewidth=0.8)
-        ax.plot(x, total_probs, label="total_prob (verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
-
-        # 添加均值参考线
-        mean_total = sum(total_probs) / len(total_probs)
-        ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")
-
-    elif template == "likert":
-        total_probs = [r["total_prob"] for r in results]
-        max_level_scores = [r["max_level_score"] for r in results]
-        likert_scores = [r["likert_score"] for r in results]
-        ax.plot(x, total_probs, label="total_prob (Likert verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
-        ax.plot(x, max_level_scores, label="max_level_score (概率最高数字分数)", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
-        ax.plot(x, likert_scores, label="likert_score (加权期望分数)", color="green", alpha=0.8, linewidth=1.0, linestyle="-.")
-
-        mean_total = sum(total_probs) / len(total_probs)
-        ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")
+    mean_total = sum(total_probs) / len(total_probs)
+    ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")
 
     ax.set_xlabel("形容词索引", fontsize=12)
     ax.set_ylabel("概率", fontsize=12)
     ax.set_title(
-        f"Verbalizer覆盖率分析（vLLM）\n模型: {model_name} | 模板: {template} | 文本: {text_content[:30]}...",
+        f"Verbalizer覆盖率分析（vLLM）\n模型: {model_name} | 模板: likert | 文本: {text_content[:30]}...",
         fontsize=14,
     )
     ax.legend(loc="upper right", fontsize=10)
@@ -357,9 +301,6 @@ def analyze_verbalizer_coverage(
     print(f"total_prob 均值: {sum(r['total_prob'] for r in results) / len(results):.4f}")
     print(f"total_prob 最小值: {min(r['total_prob'] for r in results):.4f}")
     print(f"total_prob 最大值: {max(r['total_prob'] for r in results):.4f}")
-    if template in ["binary", "ICL"]:
-        print(f"pos_prob 均值: {sum(r['pos_prob'] for r in results) / len(results):.4f}")
-        print(f"neg_prob 均值: {sum(r['neg_prob'] for r in results) / len(results):.4f}")
     print("=" * 60)
 
     return results
@@ -373,7 +314,6 @@ def main():
     print("Verbalizer覆盖率分析（vLLM版本）")
     print("=" * 60)
     print(f"模型名称: {MODEL_NAME}")
-    print(f"提示词模板: {PROMPT_TEMPLATE}")
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"量化方法: {QUANTIZATION if QUANTIZATION else '无量化'}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
@@ -384,7 +324,6 @@ def main():
     tokenizer, llm_model = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION, QUANTIZATION)
     analyze_verbalizer_coverage(
         text_content=TEXT_CONTENT,
-        template=PROMPT_TEMPLATE,
         adjective_path=config.adjective_path,
         tokenizer=tokenizer,
         llm_model=llm_model,

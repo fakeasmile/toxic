@@ -2,13 +2,13 @@
 
 【执行流程】
 1. 加载vLLM模型和tokenizer（float16，无量化，vLLM引擎）
-2. 根据模板类型定义verbalizer token词表（肯定词/否定词/Likert等级）和系统指令
+2. 根据模板类型定义verbalizer token词表（Likert等级）和系统指令
 3. 遍历数据集中的每条文本：
    a. 对该文本，为所有形容词一次性构建全部Chat Template prompt（无需手动分batch）
    b. vLLM自动调度批量推理，内部处理padding和KV Cache复用
    c. 从推理结果中提取首token的logprobs分布（Top-20，exp转换为概率）
-   d. 从概率分布中提取verbalizer token的概率，按类别求和
-   e. 归一化计算score（binary/ICL: pos/(pos+neg)；likert: 加权期望），作为该形容词与文本的相关程度
+   d. 从概率分布中提取verbalizer token的概率
+   e. 归一化计算score（likert: 加权期望），作为该形容词与文本的相关程度
    f. 收集所有形容词的score组成概念向量
 4. 保存结果JSON（content, toxic, concept向量, raw_probs）
 
@@ -18,13 +18,13 @@
 
 使用示例：
 # 无量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert
 # AWQ量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template binary --quantization awq
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template likert --quantization awq
 # FP8量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --quantization fp8
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert --quantization fp8
 # 自定义GPU显存占用
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --gpu_memory_utilization 0.8
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert --gpu_memory_utilization 0.8
 """
 
 import argparse
@@ -51,7 +51,7 @@ def parse_args():
         description="生成形容词概念向量（vLLM版本）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="使用示例:"
-               "python scripts/generate_adjective_c_r_vllm.py --mode test --dataset_name TOXICN --model_name ... --template binary"
+               "python scripts/generate_adjective_c_r_vllm.py --mode test --dataset_name TOXICN --model_name ... --template likert"
     )
 
     parser.add_argument(
@@ -79,9 +79,9 @@ def parse_args():
     parser.add_argument(
         '--template',
         type=str,
-        choices=['binary', 'likert', 'ICL'],
-        default='binary',
-        help='提示词模板类型：binary=二元判断(原始), likert=Likert程度量化, ICL=引入形容词解释'
+        choices=['likert'],
+        default='likert',
+        help='提示词模板类型'
     )
 
     parser.add_argument(
@@ -153,22 +153,11 @@ def get_first_token_ids(word_list, tokenizer):
 
     return list(dict.fromkeys(token_ids))
 
-def build_chat_messages(template, instruction, content, adj, adj_definition=""):
+def build_chat_messages(instruction, content, adj):
     """
-    根据模板类型构建Chat Template（手动拼接方式在语义上等价）
+    构建Likert Chat Template
     """
-    if template == "binary":
-        user_content = f"文本内容：{content}\n形容词：「{adj}」描述是否准确？回答： "
-    elif template == "likert":
-        user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
-    elif template == "ICL":
-        user_content = (
-            f"文本内容：{content}\n"
-            f"形容词「{adj}」的定义：{adj_definition}\n"
-            f"根据上述定义，该文本是否表现出该形容词「{adj}」所描述的特征？回答： "
-        )
-    else:
-        raise ValueError(f"不支持的模板类型: {template}")
+    user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -176,34 +165,19 @@ def build_chat_messages(template, instruction, content, adj, adj_definition=""):
     ]
     return messages
 
-def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, template, temperature, tokenizer, llm_model, threshold=1e-4):
-    # 根据模板类型定义verbalizer token（首token id集合）和提示词指令
-    if template in ["binary", "ICL"]:
-        # verbalizer tokens
-        affirmative_tokens = ["是", " 是", "Yes", " Yes", "yes", " yes"]
-        negative_tokens = ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
-        affirmative_ids = get_first_token_ids(affirmative_tokens, tokenizer)
-        negative_ids = get_first_token_ids(negative_tokens, tokenizer)
+def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, threshold=1e-4):
+    # 定义Likert verbalizer token（首token id集合）和提示词指令
+    likert_tokens = ["1", "2", "3", "4", "5"]
+    likert_ids = get_first_token_ids(likert_tokens, tokenizer)
 
-        if template == "binary":
-            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
-        elif template == "ICL":
-            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
-            # 加载形容词解释
-            definition = pd.read_csv(adjective_path)["definition"].tolist()
-
-    elif template == "likert":
-        likert_tokens = ["1", "2", "3", "4", "5"]
-        likert_ids = get_first_token_ids(likert_tokens, tokenizer)
-
-        instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
-                       "评估等级：\n"
-                       "1 = 完全不相关\n"
-                       "2 = 不太相关\n"
-                       "3 = 有点相关\n"
-                       "4 = 比较相关\n"
-                       "5 = 非常相关\n"
-                       "直接回答数字。")
+    instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+                   "评估等级：\n"
+                   "1 = 完全不相关\n"
+                   "2 = 不太相关\n"
+                   "3 = 有点相关\n"
+                   "4 = 比较相关\n"
+                   "5 = 非常相关\n"
+                   "直接回答数字。")
 
     # 加载形容词词典
     adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
@@ -230,11 +204,8 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
 
         # 在vllm中不手动分批次，构建一条文本+所有形容词的Chat Template
         prompts = []  # 关于当前文本的所有Chat Template
-        for index, adj in enumerate(adjectives):
-            if template == "ICL":
-                messages = build_chat_messages(template, instruction, content, adj, definition[index])
-            else:
-                messages = build_chat_messages(template, instruction, content, adj)
+        for adj in adjectives:
+            messages = build_chat_messages(instruction, content, adj)
 
             # 添加<|im_start|>system,<|im_start|>user,<|im_start|>assistant特殊token
             prompt_text = tokenizer.apply_chat_template(
@@ -273,34 +244,7 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
                 probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
 
-            # 根据模板类型计算score
-            if template == "binary":
-                # 计算肯定词的概率之和
-                pos_prob = 0.0
-                for tid in affirmative_ids:
-                    pos_prob = pos_prob + probs_dict.get(tid, 0.0)
-                # 计算否定词的概率之和
-                neg_prob = 0.0
-                for tid in negative_ids:
-                    neg_prob = neg_prob + probs_dict.get(tid, 0.0)
-                # 归一化计算score
-                total = pos_prob + neg_prob + 1e-8
-                score = pos_prob / total
-                raw_probs.append([pos_prob, neg_prob])
-            elif template == "ICL":
-                # 计算肯定词的概率之和
-                pos_prob = 0.0
-                for tid in affirmative_ids:
-                    pos_prob = pos_prob + probs_dict.get(tid, 0.0)
-                # 计算否定词的概率之和
-                neg_prob = 0.0
-                for tid in negative_ids:
-                    neg_prob = neg_prob + probs_dict.get(tid, 0.0)
-                # 归一化计算score
-                total = pos_prob + neg_prob + 1e-8
-                score = pos_prob / total
-                raw_probs.append([pos_prob, neg_prob])
-            elif template == "likert":
+            if template == "likert":
                 # 提取1-5等级的概率
                 level_probs = []
                 for tid in likert_ids:
@@ -375,7 +319,7 @@ def main():
     print("=" * 60 + "\n")
 
     tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization, args.quantization)
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.template, args.temperature, tokenizer, llm_model, threshold=1e-4)
+    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, threshold=1e-4)
 
     print("生成完成")
 

@@ -49,15 +49,9 @@ from configs.MLP_config import MLPConfig
 # ==================== CONFIG 区域（直接修改以下变量）====================
 MODEL_NAME = "Qwen2.5-3B-Instruct"  # models目录下的模型文件夹名
 
-# 提示词模板类型，可选: "binary", "likert", "ICL"
-PROMPT_TEMPLATE = "likert"
-
 # 文本内容和形容词（直接修改即可）
 TEXT_CONTENT = "什么被害妄想猎巫man"
 ADJECTIVE = "包容的"
-
-# ICL模板专用：形容词定义（仅ICL模板使用，不需要时可留空）
-ADJECTIVE_DEFINITION = "尊重和接纳不同群体或观点的态度，不对他人身份、地域或取向进行排斥或歧视的言论。"
 
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
@@ -111,47 +105,24 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-def build_chat_messages(template, text_content, adjective, adj_definition=""):
+def build_chat_messages(text_content, adjective):
     """
-    根据模板类型构建Chat Template的messages列表。
+    构建Likert Chat Template的messages列表。
     逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    if template in ["binary", "ICL"]:
-        if template == "binary":
-            instruction = "你是一位社会心理学专家。请判断给定形容词是否准确描述文本，只回答是或否。"
-            user_content = f"文本内容：{text_content}\n形容词：「{adjective}」描述是否准确？回答： "
-        elif template == "ICL":
-            instruction = "请根据形容词的定义，判断该文本是否表现出该形容词所描述的特征，只回答是或否。"
-            user_content = (
-                f"文本内容：{text_content}\n"
-                f"形容词「{adjective}」的定义：{adj_definition}\n"
-                f"根据上述定义，该文本是否表现出该形容词「{adjective}」所描述的特征？回答： "
-            )
-
-        verbalizer_words = ["是", " 是", "Yes", " Yes", "yes", " yes",
-                            "否", "不", " 不", "不能", "无", "No", " No", "no", " no"]
-        score_tokens = {
-            "affirmative": ["是", " 是", "Yes", " Yes", "yes", " yes"],
-            "negative": ["否", "不", " 不", "不能", "无", "No", " No", "no", " no"],
-        }
-
-    elif template == "likert":
-        instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
-                       "评估等级：\n"
-                       "1 = 完全不相关\n"
-                       "2 = 不太相关\n"
-                       "3 = 有点相关\n"
-                       "4 = 比较相关\n"
-                       "5 = 非常相关\n"
-                       "直接回答数字。")
-        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n回答： "
-        verbalizer_words = ["1", "2", "3", "4", "5"]
-        score_tokens = {
-            "likert": ["1", "2", "3", "4", "5"],
-        }
-
-    else:
-        raise ValueError(f"不支持的模板类型: {template}，可选: binary, likert, ICL")
+    instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+                   "评估等级：\n"
+                   "1 = 完全不相关\n"
+                   "2 = 不太相关\n"
+                   "3 = 有点相关\n"
+                   "4 = 比较相关\n"
+                   "5 = 非常相关\n"
+                   "直接回答数字。")
+    user_content = f"文本内容：{text_content}\n形容词：{adjective}\n回答： "
+    verbalizer_words = ["1", "2", "3", "4", "5"]
+    score_tokens = {
+        "likert": ["1", "2", "3", "4", "5"],
+    }
 
     messages = [
         {"role": "system", "content": instruction},
@@ -166,9 +137,9 @@ def main():
 
     tokenizer, llm_model = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION, QUANTIZATION)
 
-    # 根据模板构建Chat Template messages
+    # 构建Chat Template messages
     messages, verbalizer_words, score_tokens = build_chat_messages(
-        PROMPT_TEMPLATE, TEXT_CONTENT, ADJECTIVE, ADJECTIVE_DEFINITION
+        TEXT_CONTENT, ADJECTIVE
     )
 
     # 生成完整prompt文本
@@ -182,7 +153,6 @@ def main():
     print("模型推理调试（vLLM版本）")
     print("=" * 60)
     print(f"模型: {MODEL_NAME}")
-    print(f"模板类型: {PROMPT_TEMPLATE}")
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"形容词: {ADJECTIVE}")
     print(f"量化方法: {QUANTIZATION if QUANTIZATION else '无量化'}")
@@ -270,35 +240,21 @@ def main():
         print("概念向量分数计算")
         print(f"{'=' * 60}")
 
-        if PROMPT_TEMPLATE == "binary" or PROMPT_TEMPLATE == "ICL":
-            affirmative_ids = get_first_token_ids(score_tokens["affirmative"], tokenizer)
-            negative_ids = get_first_token_ids(score_tokens["negative"], tokenizer)
+        likert_ids = get_first_token_ids(score_tokens["likert"], tokenizer)
+        weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
 
-            pos_prob = sum(probs_dict.get(tid, 0.0) for tid in affirmative_ids)
-            neg_prob = sum(probs_dict.get(tid, 0.0) for tid in negative_ids)
-            total = pos_prob + neg_prob + 1e-8
-            score = pos_prob / total
+        level_probs_list = [probs_dict.get(tid, 0.0) for tid in likert_ids]
+        level_probs = torch.tensor(level_probs_list)
+        total_level_prob = level_probs.sum() + 1e-8
+        score = (weights * level_probs / total_level_prob).sum().item()
 
-            print(f"肯定词概率: {pos_prob:.6f}")
-            print(f"否定词概率: {neg_prob:.6f}")
-            print(f"归一化后概念分数: {score:.6f}")
-
-        elif PROMPT_TEMPLATE == "likert":
-            likert_ids = get_first_token_ids(score_tokens["likert"], tokenizer)
-            weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
-
-            level_probs_list = [probs_dict.get(tid, 0.0) for tid in likert_ids]
-            level_probs = torch.tensor(level_probs_list)
-            total_level_prob = level_probs.sum() + 1e-8
-            score = (weights * level_probs / total_level_prob).sum().item()
-
-            print(f"Level 1 (权重0.00): {level_probs_list[0]:.6f}")
-            print(f"Level 2 (权重0.25): {level_probs_list[1]:.6f}")
-            print(f"Level 3 (权重0.50): {level_probs_list[2]:.6f}")
-            print(f"Level 4 (权重0.75): {level_probs_list[3]:.6f}")
-            print(f"Level 5 (权重1.00): {level_probs_list[4]:.6f}")
-            print(f"Likert概率总和: {total_level_prob.item():.6f}")
-            print(f"加权期望概念分数: {score:.6f}")
+        print(f"Level 1 (权重0.00): {level_probs_list[0]:.6f}")
+        print(f"Level 2 (权重0.25): {level_probs_list[1]:.6f}")
+        print(f"Level 3 (权重0.50): {level_probs_list[2]:.6f}")
+        print(f"Level 4 (权重0.75): {level_probs_list[3]:.6f}")
+        print(f"Level 5 (权重1.00): {level_probs_list[4]:.6f}")
+        print(f"Likert概率总和: {total_level_prob.item():.6f}")
+        print(f"加权期望概念分数: {score:.6f}")
 
     print("=" * 60)
 
