@@ -61,6 +61,7 @@ models/DeepSeek-*/
 models/chinese-roberta-*/
 .trae/
 .workbuddy/
+.catpaw/
 docs/
 scripts/encode_tokens_qwen.py
 
