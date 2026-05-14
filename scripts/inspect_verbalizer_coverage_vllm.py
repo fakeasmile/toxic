@@ -8,10 +8,7 @@ inspect_prompt_template_vllm.py 负责在单样本级别（一个文本 + 一个
 在整个形容词词典上的覆盖能力是否稳定。
 
 【核心功能】
-对单条文本遍历所有形容词，使用 vLLM 推理并提取 verbalizer token 的概率总和：
-- binary / ICL 模板：分别计算 pos_prob（肯定词概率总和）、neg_prob（否定词概率总和）、
-  total_prob = pos_prob + neg_prob（verbalizer 总概率）
-- likert 模板：计算 total_prob = level_1 + ... + level_5（1-5 数字 verbalizer 总概率）
+对单条文本遍历所有形容词，使用 vLLM 推理并提取 verbalizer token 的概率总和。
 
 【评估标准】
 - total_prob 理想区间：0.6 ~ 1.0（多数形容词应在此范围内）

@@ -5,36 +5,10 @@
 
 使用示例:
     # 1. 训练+测试
-    python utils/mlp_pipeline.py --mode all
+    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template likert --epochs 500 --patience 20
     
-    # 2. 仅训练模式
-    python utils/mlp_pipeline.py --mode train
-    
-    # 3. 仅测试模式 (必须指定实验时间戳)
+    # 2. 仅测试模式 (必须指定实验时间戳)
     python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
-
-    # 4. 自定义数据集和超参数（完整命令）
-    python utils/mlp_pipeline.py --mode all
-        --dataset_name COLD
-        --model_name Qwen2.5-1.5B-Instruct
-        --template binary
-        --batch_size 32
-        --epochs 100
-        --max_lr 5e-4
-        --pct_start 0.2
-        --div_factor 25
-        --final_div_factor 10000
-        --anneal_strategy cos
-        --dropout_rate 0.4
-        --hidden_features 128
-        --patience 20
-        --use_deterministic
-        --seed 42
-    一般情况下：
-    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template binary --epochs 500 --use_deterministic
-    
-    # 5. 启用确定性模式 (确保实验可复现)
-    python utils/mlp_pipeline.py --mode all --use_deterministic --seed 42
 
 命令行参数说明:
     运行模式:
@@ -44,7 +18,7 @@
     数据集配置:
         --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
         --model_name        LLM模型名称 (默认: Qwen2.5-1.5B-Instruct)
-        --template          提示词模板类型 (binary/likert, 默认: binary)
+        --template          提示词模板类型 (默认: binary)
     
     随机种子:
         --seed              随机种子 (默认: 1)
@@ -138,8 +112,7 @@ def parse_args():
     # 数据集配置
     parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
     parser.add_argument('--model_name', type=str, default='Qwen2.5-1.5B-Instruct', help='LLM模型名称')
-    parser.add_argument('--template', type=str, choices=['binary', 'likert'], default='binary',
-                        help='提示词模板类型：binary=二元判断, likert=Likert程度量化')
+    parser.add_argument('--template', type=str, default='likert',help='提示词模板类型')
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')

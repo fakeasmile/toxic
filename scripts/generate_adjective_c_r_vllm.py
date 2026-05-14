@@ -1,8 +1,8 @@
 """生成形容词概念向量（Chat Template,vLLM版本）
 
 【执行流程】
-1. 加载vLLM模型和tokenizer（float16，无量化，vLLM引擎）
-2. 根据模板类型定义verbalizer token词表（Likert等级）和系统指令
+1. 加载vLLM模型和tokenizer
+2. 定义verbalizer token词表（Likert等级）和系统指令
 3. 遍历数据集中的每条文本：
    a. 对该文本，为所有形容词一次性构建全部Chat Template prompt（无需手动分batch）
    b. vLLM自动调度批量推理，内部处理padding和KV Cache复用
@@ -10,21 +10,17 @@
    d. 从概率分布中提取verbalizer token的概率
    e. 归一化计算score（likert: 加权期望），作为该形容词与文本的相关程度
    f. 收集所有形容词的score组成概念向量
-4. 保存结果JSON（content, toxic, concept向量, raw_probs）
+4. 保存结果JSON
 
 【配套调试工具】
 - inspect_prompt_template_vllm.py：单样本切片（1文本+1形容词），调试提示词和verbalizer
-- inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率
+- inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率，即LLM的首token是否将概率质量分配给verbalizer token词表
 
 使用示例：
 # 无量化推理
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert
 # AWQ量化推理
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template likert --quantization awq
-# FP8量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert --quantization fp8
-# 自定义GPU显存占用
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert --gpu_memory_utilization 0.8
 """
 
 import argparse
@@ -50,8 +46,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="生成形容词概念向量（vLLM版本）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="使用示例:"
-               "python scripts/generate_adjective_c_r_vllm.py --mode test --dataset_name TOXICN --model_name ... --template likert"
+        epilog=""
     )
 
     parser.add_argument(
@@ -79,7 +74,7 @@ def parse_args():
     parser.add_argument(
         '--template',
         type=str,
-        choices=['likert'],
+        required=True,
         default='likert',
         help='提示词模板类型'
     )
@@ -244,17 +239,16 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
                 probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
 
-            if template == "likert":
-                # 提取1-5等级的概率
-                level_probs = []
-                for tid in likert_ids:
-                    level_probs.append(probs_dict.get(tid, 0.0))
+            # 提取1-5等级的概率
+            level_probs = []
+            for tid in likert_ids:
+                level_probs.append(probs_dict.get(tid, 0.0))
 
-                weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
-                level_probs = torch.tensor(level_probs)
-                total_level_prob = level_probs.sum() + 1e-8
-                score = (weights * level_probs / total_level_prob).sum().item()
-                raw_probs.append(level_probs.tolist())
+            weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+            level_probs = torch.tensor(level_probs)
+            total_level_prob = level_probs.sum() + 1e-8
+            score = (weights * level_probs / total_level_prob).sum().item()
+            raw_probs.append(level_probs.tolist())
 
             concept_vector.append(score)
 

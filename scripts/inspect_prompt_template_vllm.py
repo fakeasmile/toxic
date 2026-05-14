@@ -22,11 +22,6 @@ generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容�
 - 通过本脚本调试确认模板和 verbalizer 合理后，再运行 generate_adjective_c_r_vllm.py 进行批量生成，
   可确保生成的概念向量质量。
 
-【支持的模板类型】
-- binary: 二元判断（是/否），用于判断形容词是否准确描述文本；
-- likert: 1-5 程度量化，用于评估文本具有形容词特征的程度；
-- ICL: 基于形容词定义的判断（In-Context Learning），引入形容词定义进行推理。
-
 【使用方法】
 直接修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容、形容词、形容词定义等），然后运行：
 python scripts/inspect_prompt_template_vllm.py
