@@ -477,6 +477,11 @@ def main():
         train_concepts = load_concept_vectors(config.train_concept_path)
         test_concepts = load_concept_vectors(config.test_concept_path)
 
+        actual_num_concepts = len(train_concepts[0])
+        if config.num_concepts != actual_num_concepts:
+            print(f">>> 警告: num_concepts={config.num_concepts} 与概念向量维度={actual_num_concepts} 不匹配，自动修正")
+            config.num_concepts = actual_num_concepts
+
         train_texts_split, val_texts, train_labels_split, val_labels = train_test_split(
             train_texts, train_labels, test_size=0.1,
             stratify=train_labels, random_state=config.seed
