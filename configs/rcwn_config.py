@@ -15,7 +15,7 @@ class RCWNConfig:
         self.dataset_name = "TOXICN"
         self.plm_name = "chinese-roberta-wwm-ext"
 
-        self.num_concepts = 40
+        self.num_concepts = 56
         self.concept_vocab_path = self.raw_data_path / "adjective" / "discovered_concepts.csv"
 
         self.plm_frozen = True
