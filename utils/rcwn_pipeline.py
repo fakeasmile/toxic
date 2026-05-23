@@ -509,7 +509,7 @@ def main():
         model = train(config, train_dataset, val_dataset, test_dataset, tokenizer)
 
         if args.mode == 'all':
-            evaluate(config, timestamp)
+            evaluate(config)
 
     elif args.mode == 'test':
         if not args.timestamp:
