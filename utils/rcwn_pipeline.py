@@ -408,7 +408,7 @@ def evaluate(config, timestamp=None):
             "pred_label": int(all_preds[i]),
             "pred_label_name": label_names[int(all_preds[i])],
             "correct": bool(all_preds[i] == all_labels[i]),
-            "concept_scores": [round(s, 4) for s in all_concept_scores[i]],
+            "concept_scores": [round(float(s), 4) for s in all_concept_scores[i]],
         })
     with open(test_results_dir / "predictions.json", "w", encoding="utf-8") as f:
         json.dump(predictions, f, indent=2, ensure_ascii=False)
