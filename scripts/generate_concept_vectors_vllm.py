@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument('--dataset_name', type=str, default='TOXICN')
     parser.add_argument('--model_name', type=str, default='Qwen2.5-7B-Instruct-AWQ')
     parser.add_argument('--quantization', type=str, default='awq', choices=[None, 'awq', 'fp8'])
-    parser.add_argument('--gpu_memory_utilization', type=float, default=0.85)
+    parser.add_argument('--gpu_memory_utilization', type=float, default=0.70)
     parser.add_argument('--temperature', type=float, default=2.0)
     parser.add_argument('--concept_vocab_path', type=str, default=None)
     return parser.parse_args()
@@ -65,8 +65,8 @@ def load_vllm_model(model_path, model_name, gpu_memory_utilization=0.85, quantiz
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
-        max_num_seqs=256,
-        max_num_batched_tokens=4096,
+        max_num_seqs=128,
+        max_num_batched_tokens=2048,
     )
     return tokenizer, llm
 
