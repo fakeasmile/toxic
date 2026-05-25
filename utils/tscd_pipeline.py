@@ -231,7 +231,6 @@ def train_stage1(config, train_dataset, val_dataset, test_dataset, tokenizer):
                 adv_loss = config.lambda_adv * adv_cls_loss
                 adv_loss.backward()
                 fgm.restore()
-                optimizer.zero_grad()
                 total_adv += adv_cls_loss.item()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
