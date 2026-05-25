@@ -146,7 +146,7 @@ def update_config(args):
 
 
 def load_raw_data(raw_data_path, dataset_name, mode):
-    data_path = raw_data_path / dataset_name / f"{mode}.json"
+    data_path = Path(raw_data_path) / dataset_name / f"{mode}.json"
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     texts = [d["content"] for d in data]
