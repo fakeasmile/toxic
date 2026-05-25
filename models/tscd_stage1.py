@@ -4,7 +4,7 @@ from transformers import AutoModel
 
 
 class FGM:
-    def __init__(self, model, epsilon=0.5):
+    def __init__(self, model, epsilon=0.3):
         self.model = model
         self.epsilon = epsilon
         self.backup = {}
@@ -56,7 +56,7 @@ class Stage1Model(nn.Module):
         return logits, proj, h
 
 
-def supervised_contrastive_loss(proj, labels, temperature=0.07):
+def supervised_contrastive_loss(proj, labels, temperature=0.15):
     features = nn.functional.normalize(proj, dim=1)
     similarity = features @ features.T / temperature
 

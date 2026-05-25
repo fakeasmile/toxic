@@ -30,12 +30,12 @@ class TSCDConfig:
         self.s1_max_seq_length = 128
 
         self.use_scl = True
-        self.scl_temperature = 0.07
+        self.scl_temperature = 0.15
         self.lambda_scl = 0.1
 
         self.use_fgm = True
-        self.fgm_epsilon = 0.5
-        self.lambda_adv = 0.5
+        self.fgm_epsilon = 0.3
+        self.lambda_adv = 1.0
 
         # Stage 2: Concept Distillation
         self.s2_batch_size = 32
