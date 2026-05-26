@@ -151,12 +151,14 @@ def main():
     with open(data_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
 
-    tokenizer, llm = load_vllm_model(
-        config.base_path / "models", args.model_name,
-        args.gpu_memory_utilization, args.quantization
-    )
-
     sampling_params = SamplingParams(temperature=0.1, max_tokens=args.max_tokens)
+
+    need_llm = (not args.skip_rationale) or (not args.skip_concepts)
+    if need_llm:
+        tokenizer, llm = load_vllm_model(
+            config.base_path / "models", args.model_name,
+            args.gpu_memory_utilization, args.quantization
+        )
 
     if not args.skip_rationale:
         print("阶段1: 批量生成rationale...")
@@ -189,14 +191,6 @@ def main():
         with open(rationale_output_path, "w", encoding="utf-8") as f:
             json.dump(rationale_results, f, ensure_ascii=False, indent=2)
         print(f"Rationale结果保存到: {rationale_output_path}")
-
-        del llm
-        import gc
-        import torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        print("已释放阶段1的vLLM引擎显存")
     else:
         print("跳过阶段1 (rationale已生成)")
 
@@ -206,10 +200,11 @@ def main():
         concept_max_tokens = min(args.max_tokens, 256)
         concept_sampling_params = SamplingParams(temperature=0.1, max_tokens=concept_max_tokens)
 
-        _, llm = load_vllm_model(
-            config.base_path / "models", args.model_name,
-            args.gpu_memory_utilization, args.quantization
-        )
+        if args.skip_rationale:
+            tokenizer, llm = load_vllm_model(
+                config.base_path / "models", args.model_name,
+                args.gpu_memory_utilization, args.quantization
+            )
 
         concept_prompts = []
         for sample in dataset:
