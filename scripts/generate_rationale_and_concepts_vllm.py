@@ -34,6 +34,8 @@ def parse_args():
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--quantization", type=str, default=None, choices=[None, "awq", "fp8"])
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
+    parser.add_argument("--skip_rationale", action="store_true", default=False)
+    parser.add_argument("--skip_concepts", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -156,67 +158,111 @@ def main():
 
     sampling_params = SamplingParams(temperature=0.1, max_tokens=args.max_tokens)
 
-    print("阶段1: 批量生成rationale...")
-    rationale_prompts = []
-    for sample in dataset:
-        prompt = build_rationale_prompt(sample["content"])
-        messages = [
-            {"role": "system", "content": "你是一个中文有害言论分析专家，请严格按照指定格式输出。"},
-            {"role": "user", "content": prompt},
-        ]
-        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        rationale_prompts.append(prompt_text)
+    if not args.skip_rationale:
+        print("阶段1: 批量生成rationale...")
+        rationale_prompts = []
+        for sample in dataset:
+            prompt = build_rationale_prompt(sample["content"])
+            messages = [
+                {"role": "system", "content": "你是一个中文有害言论分析专家，请严格按照指定格式输出。"},
+                {"role": "user", "content": prompt},
+            ]
+            prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            rationale_prompts.append(prompt_text)
 
-    rationale_results = []
-    for i in tqdm(range(0, len(rationale_prompts), args.batch_size), desc="Rationale生成"):
-        batch_prompts = rationale_prompts[i:i + args.batch_size]
-        outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
+        rationale_results = []
+        for i in tqdm(range(0, len(rationale_prompts), args.batch_size), desc="Rationale生成"):
+            batch_prompts = rationale_prompts[i:i + args.batch_size]
+            outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
 
-        for j, output in enumerate(outputs):
-            response = output.outputs[0].text
-            parsed = parse_rationale(response)
-            sample_idx = i + j
-            rationale_results.append({
-                "content": dataset[sample_idx]["content"],
-                "toxic": dataset[sample_idx]["toxic"],
-                "rationale": parsed["rationale"],
-                "llm_label": parsed["label"],
-            })
+            for j, output in enumerate(outputs):
+                response = output.outputs[0].text
+                parsed = parse_rationale(response)
+                sample_idx = i + j
+                rationale_results.append({
+                    "content": dataset[sample_idx]["content"],
+                    "toxic": dataset[sample_idx]["toxic"],
+                    "rationale": parsed["rationale"],
+                    "llm_label": parsed["label"],
+                })
 
-    with open(rationale_output_path, "w", encoding="utf-8") as f:
-        json.dump(rationale_results, f, ensure_ascii=False, indent=2)
-    print(f"Rationale结果保存到: {rationale_output_path}")
+        with open(rationale_output_path, "w", encoding="utf-8") as f:
+            json.dump(rationale_results, f, ensure_ascii=False, indent=2)
+        print(f"Rationale结果保存到: {rationale_output_path}")
 
-    print("\n阶段2: 批量生成概念评分...")
-    concept_prompts = []
-    for sample in dataset:
-        prompt = build_concept_prompt(sample["content"], concepts)
-        messages = [
-            {"role": "system", "content": "你是一个语言分析专家，请严格按照JSON格式输出评分。"},
-            {"role": "user", "content": prompt},
-        ]
-        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        concept_prompts.append(prompt_text)
+        del llm
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("已释放阶段1的vLLM引擎显存")
+    else:
+        print("跳过阶段1 (rationale已生成)")
 
-    concept_results = []
-    for i in tqdm(range(0, len(concept_prompts), args.batch_size), desc="概念评分生成"):
-        batch_prompts = concept_prompts[i:i + args.batch_size]
-        outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
+    if not args.skip_concepts:
+        print("\n阶段2: 批量生成概念评分...")
+        concept_batch_size = max(1, args.batch_size // 8)
+        concept_max_tokens = min(args.max_tokens, 256)
+        concept_sampling_params = SamplingParams(temperature=0.1, max_tokens=concept_max_tokens)
 
-        for j, output in enumerate(outputs):
-            response = output.outputs[0].text
-            scores = parse_concept_scores(response, concepts)
-            sample_idx = i + j
-            concept_results.append({
-                "content": dataset[sample_idx]["content"],
-                "concept_scores": scores,
-            })
+        _, llm = load_vllm_model(
+            config.base_path / "models", args.model_name,
+            args.gpu_memory_utilization, args.quantization
+        )
 
-    with open(concept_output_path, "w", encoding="utf-8") as f:
-        json.dump(concept_results, f, ensure_ascii=False, indent=2)
-    print(f"概念评分结果保存到: {concept_output_path}")
+        concept_prompts = []
+        for sample in dataset:
+            prompt = build_concept_prompt(sample["content"], concepts)
+            messages = [
+                {"role": "system", "content": "你是一个语言分析专家，请严格按照JSON格式输出评分。"},
+                {"role": "user", "content": prompt},
+            ]
+            prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            concept_prompts.append(prompt_text)
 
-    print(f"\n生成完成! Rationale: {len(rationale_results)}条, 概念评分: {len(concept_results)}条")
+        concept_results = []
+        for i in tqdm(range(0, len(concept_prompts), concept_batch_size), desc="概念评分生成"):
+            batch_prompts = concept_prompts[i:i + concept_batch_size]
+            try:
+                outputs = llm.generate(batch_prompts, concept_sampling_params, use_tqdm=False)
+            except Exception as e:
+                print(f"\n批次 {i} 生成失败: {e}, 尝试逐条生成...")
+                for k, single_prompt in enumerate(batch_prompts):
+                    try:
+                        single_output = llm.generate([single_prompt], concept_sampling_params, use_tqdm=False)
+                        response = single_output[0].outputs[0].text
+                        scores = parse_concept_scores(response, concepts)
+                        sample_idx = i + k
+                        concept_results.append({
+                            "content": dataset[sample_idx]["content"],
+                            "concept_scores": scores,
+                        })
+                    except Exception as e2:
+                        print(f"  样本 {i+k} 失败: {e2}, 使用默认评分")
+                        sample_idx = i + k
+                        concept_results.append({
+                            "content": dataset[sample_idx]["content"],
+                            "concept_scores": [0.5] * len(concepts),
+                        })
+                continue
+
+            for j, output in enumerate(outputs):
+                response = output.outputs[0].text
+                scores = parse_concept_scores(response, concepts)
+                sample_idx = i + j
+                concept_results.append({
+                    "content": dataset[sample_idx]["content"],
+                    "concept_scores": scores,
+                })
+
+        with open(concept_output_path, "w", encoding="utf-8") as f:
+            json.dump(concept_results, f, ensure_ascii=False, indent=2)
+        print(f"概念评分结果保存到: {concept_output_path}")
+    else:
+        print("跳过阶段2 (概念评分已生成)")
+
+    print("\n生成完成!")
 
 
 if __name__ == "__main__":
