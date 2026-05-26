@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--quantization", type=str, default=None, choices=[None, "awq", "fp8"])
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.85)
     parser.add_argument("--skip_rationale", action="store_true", default=False)
     parser.add_argument("--skip_concepts", action="store_true", default=False)
     return parser.parse_args()
