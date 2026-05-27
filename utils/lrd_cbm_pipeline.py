@@ -309,6 +309,9 @@ def evaluate(config, timestamp):
         setattr(saved_config, key, value)
     saved_config.base_path = Path(saved_config.base_path) if isinstance(saved_config.base_path, str) else saved_config.base_path
     saved_config.experiment_path = Path(saved_config.experiment_path) if isinstance(saved_config.experiment_path, str) else saved_config.experiment_path
+    saved_config.models_path = Path(saved_config.models_path) if isinstance(saved_config.models_path, str) else saved_config.models_path
+    saved_config.raw_data_path = Path(saved_config.raw_data_path) if isinstance(saved_config.raw_data_path, str) else saved_config.raw_data_path
+    saved_config.processed_path = Path(saved_config.processed_path) if isinstance(saved_config.processed_path, str) else saved_config.processed_path
 
     if saved_config.use_deterministic:
         from utils.seed import set_reproducibility
@@ -316,7 +319,7 @@ def evaluate(config, timestamp):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    tokenizer = AutoTokenizer.from_pretrained(saved_config.plm_name)
+    tokenizer = AutoTokenizer.from_pretrained(str(Path(saved_config.models_path) / saved_config.plm_name))
 
     raw_test_data = load_raw_data(saved_config.dataset_name, "test")
     rationale_data = load_rationale_data(saved_config, saved_config.dataset_name, "test")
@@ -362,7 +365,7 @@ def evaluate(config, timestamp):
     )
 
     model = LRDCBMModel(
-        plm_name=saved_config.plm_name,
+        plm_name=str(Path(saved_config.models_path) / saved_config.plm_name),
         num_concepts=saved_config.num_concepts,
         num_classes=saved_config.num_classes,
         dropout=saved_config.dropout,
@@ -601,7 +604,7 @@ def main():
         if not config.use_rationale:
             test_rationales = None
 
-        tokenizer = AutoTokenizer.from_pretrained(config.plm_name)
+        tokenizer = AutoTokenizer.from_pretrained(str(config.models_path / config.plm_name))
 
         train_dataset = LRDCBMDataset(
             split_texts, split_labels, split_rationales, split_concept_scores,
@@ -626,7 +629,7 @@ def main():
         print(f">>> 正在使用设备: {device}")
 
         model = LRDCBMModel(
-            plm_name=config.plm_name,
+            plm_name=str(config.models_path / config.plm_name),
             num_concepts=config.num_concepts,
             num_classes=config.num_classes,
             dropout=config.dropout,

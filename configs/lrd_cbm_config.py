@@ -13,6 +13,7 @@ class LRDCBMConfig():
         self.seed = 1
         self.use_deterministic = False
 
+        self.models_path = self.base_path / "models"
         self.plm_name = "chinese-roberta-wwm-ext"
         self.plm_hidden_size = 768
         self.max_length = 128
