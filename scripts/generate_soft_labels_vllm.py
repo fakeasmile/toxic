@@ -78,7 +78,7 @@ def parse_soft_label_response(response):
     return {"label": label, "confidence": confidence, "soft_label": soft_label, "rationale": rationale}
 
 
-def load_vllm_model(model_path, model_name, gpu_memory_utilization=0.85, quantization=None):
+def load_vllm_model(model_path, model_name, gpu_memory_utilization=0.75, quantization=None):
     llm_path = model_path / model_name
     if not llm_path.exists():
         raise ValueError(f"LLM path {llm_path} does not exist")
@@ -95,7 +95,7 @@ def load_vllm_model(model_path, model_name, gpu_memory_utilization=0.85, quantiz
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
-        max_num_seqs=256,
+        max_num_seqs=128,
         max_num_batched_tokens=4096,
     )
     return tokenizer, llm
