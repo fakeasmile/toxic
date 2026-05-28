@@ -101,6 +101,13 @@ def parse_args():
         help='采样温度（默认2.0），用于控制概率分布的分散程度'
     )
 
+    parser.add_argument(
+        '--adjective_file',
+        type=str,
+        default=None,
+        help='形容词词典文件名（位于data/raw/adjective/下），默认使用MLPConfig中的adjective_path'
+    )
+
     return parser.parse_args()
 
 
@@ -174,12 +181,25 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                    "5 = 非常相关\n"
                    "直接回答数字。")
 
-    # 加载形容词词典
-    adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
+    # 加载形容词词典（兼容两种CSV格式）
+    df_adj = pd.read_csv(adjective_path)
+    if "chinese" in df_adj.columns:
+        adjectives = df_adj["chinese"].tolist()
+    elif "name" in df_adj.columns:
+        adjectives = df_adj["name"].tolist()
+    else:
+        raise ValueError(f"形容词词典 {adjective_path} 缺少 'chinese' 或 'name' 列")
+    print(f"加载形容词词典: {adjective_path} ({len(adjectives)} 个形容词)")
 
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
+
+    # 过滤空内容
+    original_len = len(data_set)
+    data_set = [s for s in data_set if isinstance(s.get("content"), str) and len(s["content"].strip()) > 0]
+    if len(data_set) < original_len:
+        print(f"过滤空内容样本: {original_len} -> {len(data_set)} (移除 {original_len - len(data_set)} 条)")
 
     # vLLM采样配置
     sampling_params = SamplingParams(
@@ -290,6 +310,12 @@ def main():
 
     config = MLPConfig()  # 加载模型配置
 
+    # 形容词词典路径
+    if args.adjective_file is not None:
+        adjective_path = config.raw_data_path / "adjective" / args.adjective_file
+    else:
+        adjective_path = config.adjective_path
+
     # 动态生成依赖 dataset_name/model_name 的路径
     data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"  # 原始数据集目录
     concept_dir = config.processed_path / args.dataset_name / args.model_name / args.template  # 概念向量输出目录
@@ -307,13 +333,14 @@ def main():
     print(f"量化方法: {args.quantization if args.quantization else '无量化'}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"采样温度: {args.temperature}")
+    print(f"形容词词典: {adjective_path}")
     print(f"数据集路径: {data_path}")
     print(f"JSON输出路径: {output_path}")
     print(f"CSV输出路径: {csv_output_path}")
     print("=" * 60 + "\n")
 
     tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization, args.quantization)
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, threshold=1e-4)
+    generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, args.temperature, tokenizer, llm_model, threshold=1e-4)
 
     print("生成完成")
 

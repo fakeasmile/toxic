@@ -4,6 +4,15 @@ import torch
 import os
 
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
 def set_reproducibility(config):
     # ===================== 🔥 修复报错：必须放在最顶部 =====================
     if config.use_deterministic:
