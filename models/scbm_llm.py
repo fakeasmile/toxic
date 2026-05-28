@@ -17,10 +17,10 @@ class ConceptBottleneckLayer(nn.Module):
 class SCBMLLMModel(nn.Module):
     def __init__(
         self,
-        model_name="Qwen2.5-7B-Instruct-AWQ",
+        model_name="Qwen2.5-3B-Instruct",
         num_concepts=56,
         num_classes=2,
-        concept_layer_idx=20,
+        concept_layer_idx=-1,
         lora_r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -28,7 +28,6 @@ class SCBMLLMModel(nn.Module):
         soft_label_weight=0.5,
         soft_label_temperature=2.0,
         use_residual=True,
-        use_4bit=True,
     ):
         super().__init__()
         self.num_concepts = num_concepts
@@ -45,31 +44,25 @@ class SCBMLLMModel(nn.Module):
             "torch_dtype": torch.float16,
         }
 
-        if use_4bit:
-            try:
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True,
-                )
-                self.llm = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    quantization_config=bnb_config,
-                    **load_kwargs,
-                )
-            except ValueError:
-                self.llm = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    **load_kwargs,
-                )
-        else:
+        try:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
             self.llm = AutoModelForCausalLM.from_pretrained(
                 model_name,
+                quantization_config=bnb_config,
                 **load_kwargs,
             )
+        except Exception:
+            self.llm = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
 
         hidden_dim = self.llm.config.hidden_size
+        num_layers = getattr(self.llm.config, 'num_hidden_layers', -1)
+        if self.concept_layer_idx < 0:
+            self.concept_layer_idx = max(0, num_layers // 2)
 
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -79,6 +72,7 @@ class SCBMLLMModel(nn.Module):
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
         self.llm = get_peft_model(self.llm, lora_config)
+        self.llm.print_trainable_parameters()
 
         self.concept_bottleneck = ConceptBottleneckLayer(hidden_dim, num_concepts)
 
@@ -92,7 +86,6 @@ class SCBMLLMModel(nn.Module):
         self.kl_loss = nn.KLDivLoss(reduction="batchmean")
 
         self._concept_hidden = None
-
         self._register_hook()
 
     def _register_hook(self):
@@ -109,8 +102,8 @@ class SCBMLLMModel(nn.Module):
             else:
                 self._concept_hidden = output[:, -1, :]
 
-        if self.concept_layer_idx < len(layers):
-            layers[self.concept_layer_idx].register_forward_hook(hook_fn)
+        idx = min(self.concept_layer_idx, len(layers) - 1)
+        layers[idx].register_forward_hook(hook_fn)
 
     def forward(self, input_ids, attention_mask=None, labels=None, soft_labels=None, concept_labels=None):
         self._concept_hidden = None

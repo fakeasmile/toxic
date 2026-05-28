@@ -12,7 +12,7 @@ class SCBMLLMConfig:
     seed = 1
     use_deterministic = False
 
-    llm_model_name = "Qwen2.5-7B-Instruct-AWQ"
+    llm_model_name = "Qwen2.5-3B-Instruct"
     max_length = 128
 
     lora_r = 16
@@ -22,10 +22,9 @@ class SCBMLLMConfig:
 
     num_concepts = 56
     num_classes = 2
-    concept_layer_idx = 20
+    concept_layer_idx = -1
     concept_loss_weight = 0.1
     use_residual = True
-    use_4bit = True
 
     soft_label_weight = 0.5
     soft_label_temperature = 2.0
