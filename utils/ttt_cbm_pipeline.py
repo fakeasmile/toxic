@@ -104,29 +104,33 @@ def evaluate_epoch(model, loader, device, use_ttt=False):
     all_labels = []
     all_concept_probs = []
 
-    with torch.no_grad():
-        for batch in loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            concept_labels = batch.get("concept_labels")
-            if concept_labels is not None:
-                concept_labels = concept_labels.to(device)
+    for batch in loader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+        concept_labels = batch.get("concept_labels")
+        if concept_labels is not None:
+            concept_labels = concept_labels.to(device)
 
-            if use_ttt:
-                model.ttt_adapt(input_ids, attention_mask)
+        if use_ttt:
+            model.ttt_adapt(input_ids, attention_mask)
 
+        with torch.no_grad():
             outputs = model(input_ids, attention_mask, labels, concept_labels)
-            logits, concept_probs, loss = outputs
+            if len(outputs) == 3:
+                logits, concept_probs, loss = outputs
+            else:
+                logits, concept_probs = outputs
+                loss = torch.tensor(0.0)
 
-            if use_ttt:
-                model.ttt_restore()
+        if use_ttt:
+            model.ttt_restore()
 
-            total_loss += loss.item()
-            preds = torch.argmax(logits, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_concept_probs.extend(concept_probs.cpu().numpy())
+        total_loss += loss.item()
+        preds = torch.argmax(logits, dim=1)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_concept_probs.extend(concept_probs.cpu().numpy())
 
     avg_loss = total_loss / len(loader)
     return avg_loss, all_preds, all_labels, all_concept_probs

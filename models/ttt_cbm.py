@@ -1,4 +1,3 @@
-import copy
 import torch
 import torch.nn as nn
 from transformers import AutoModel
@@ -61,7 +60,7 @@ class TTTCBMModel(nn.Module):
             nn.Linear(plm_hidden, vocab_size),
         )
 
-        self._ttt_original_state = None
+        self._ttt_original_params = None
 
     def forward(self, input_ids, attention_mask, labels=None, concept_labels=None):
         outputs = self.plm(input_ids=input_ids, attention_mask=attention_mask)
@@ -95,14 +94,14 @@ class TTTCBMModel(nn.Module):
 
         ttt_params = list(self.concept_bottleneck.parameters()) + list(self.classifier.parameters())
 
-        self._ttt_original_state = copy.deepcopy({
-            k: v.clone() for k, v in self.state_dict().items()
-        })
+        self._ttt_original_params = [p.clone() for p in ttt_params]
+
+        device = input_ids.device
 
         labels_mlm = input_ids.clone()
-        probability_matrix = torch.full(labels_mlm.shape, self.ttt_mlm_mask_ratio)
-        special_tokens_mask = attention_mask == 0
-        probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+        probability_matrix = torch.full(labels_mlm.shape, self.ttt_mlm_mask_ratio, device=device)
+        special_tokens_mask = (attention_mask == 0)
+        probability_matrix = probability_matrix.masked_fill(special_tokens_mask, 0.0)
         mlm_mask = torch.bernoulli(probability_matrix).bool()
         labels_mlm[~mlm_mask] = -100
 
@@ -130,6 +129,8 @@ class TTTCBMModel(nn.Module):
                 ttt_optimizer.step()
 
     def ttt_restore(self):
-        if self._ttt_original_state is not None:
-            self.load_state_dict(self._ttt_original_state)
-            self._ttt_original_state = None
+        if self._ttt_original_params is not None:
+            ttt_params = list(self.concept_bottleneck.parameters()) + list(self.classifier.parameters())
+            for p, orig in zip(ttt_params, self._ttt_original_params):
+                p.data.copy_(orig)
+            self._ttt_original_params = None
