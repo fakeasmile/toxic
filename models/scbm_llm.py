@@ -74,54 +74,33 @@ class SCBMLLMModel(nn.Module):
         self.llm = get_peft_model(self.llm, lora_config)
         self.llm.print_trainable_parameters()
 
-        self.concept_bottleneck = ConceptBottleneckLayer(hidden_dim, num_concepts)
+        llm_device = next(self.llm.parameters()).device
+
+        self.concept_bottleneck = ConceptBottleneckLayer(hidden_dim, num_concepts).to(dtype=torch.float16, device=llm_device)
 
         if use_residual:
-            self.classifier = nn.Linear(hidden_dim + num_concepts, num_classes)
+            self.classifier = nn.Linear(hidden_dim + num_concepts, num_classes).to(dtype=torch.float16, device=llm_device)
         else:
-            self.classifier = nn.Linear(num_concepts, num_classes)
+            self.classifier = nn.Linear(num_concepts, num_classes).to(dtype=torch.float16, device=llm_device)
 
         self.ce_loss = nn.CrossEntropyLoss()
         self.concept_loss = nn.MSELoss()
         self.kl_loss = nn.KLDivLoss(reduction="batchmean")
 
-        self._concept_hidden = None
-        self._register_hook()
-
-    def _register_hook(self):
-        model = self.llm
-        if hasattr(model, 'base_model'):
-            model = model.base_model.model
-        if hasattr(model, 'model'):
-            model = model.model
-        layers = model.layers
-
-        def hook_fn(module, input, output):
-            if isinstance(output, tuple):
-                self._concept_hidden = output[0][:, -1, :]
-            else:
-                self._concept_hidden = output[:, -1, :]
-
-        idx = min(self.concept_layer_idx, len(layers) - 1)
-        layers[idx].register_forward_hook(hook_fn)
+    def _get_hidden_from_layer(self, hidden_states, layer_idx):
+        if hidden_states is None:
+            return None
+        idx = min(layer_idx + 1, len(hidden_states) - 1)
+        return hidden_states[idx][:, -1, :]
 
     def forward(self, input_ids, attention_mask=None, labels=None, soft_labels=None, concept_labels=None):
-        self._concept_hidden = None
-
         outputs = self.llm(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        logits_all = outputs.logits
 
-        last_token_logits = logits_all[:, -1, :]
+        hidden_states = outputs.hidden_states
+        concept_input = self._get_hidden_from_layer(hidden_states, self.concept_layer_idx)
 
-        if self._concept_hidden is not None:
-            concept_input = self._concept_hidden
-        else:
-            hidden_states = outputs.hidden_states
-            if hidden_states is not None:
-                layer_idx = min(self.concept_layer_idx + 1, len(hidden_states) - 1)
-                concept_input = hidden_states[layer_idx][:, -1, :]
-            else:
-                concept_input = last_token_logits
+        if concept_input is None:
+            concept_input = outputs.logits[:, -1, :]
 
         concept_probs = self.concept_bottleneck(concept_input)
 
@@ -134,10 +113,12 @@ class SCBMLLMModel(nn.Module):
 
         loss = None
         if labels is not None:
+            labels = labels.to(logits.device)
             ce = self.ce_loss(logits, labels)
             loss = ce
 
             if soft_labels is not None:
+                soft_labels = soft_labels.to(logits.device)
                 T = self.soft_label_temperature
                 log_probs = nn.functional.log_softmax(logits / T, dim=1)
                 soft_targets = nn.functional.softmax(soft_labels / T, dim=1)
@@ -145,6 +126,7 @@ class SCBMLLMModel(nn.Module):
                 loss = loss + self.soft_label_weight * kl
 
             if concept_labels is not None:
+                concept_labels = concept_labels.to(logits.device)
                 mse = self.concept_loss(concept_probs, concept_labels)
                 loss = loss + self.concept_loss_weight * mse
 
