@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 
 
@@ -28,6 +28,7 @@ class SCBMLLMModel(nn.Module):
         soft_label_weight=0.5,
         soft_label_temperature=2.0,
         use_residual=True,
+        use_4bit=True,
     ):
         super().__init__()
         self.num_concepts = num_concepts
@@ -38,12 +39,28 @@ class SCBMLLMModel(nn.Module):
         self.soft_label_temperature = soft_label_temperature
         self.use_residual = use_residual
 
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            device_map="auto",
-            torch_dtype=torch.float16,
-        )
+        if use_4bit:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                device_map="auto",
+                quantization_config=bnb_config,
+                torch_dtype=torch.float16,
+            )
+        else:
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                device_map="auto",
+                torch_dtype=torch.float16,
+            )
+
         hidden_dim = self.llm.config.hidden_size
 
         lora_config = LoraConfig(
@@ -71,8 +88,12 @@ class SCBMLLMModel(nn.Module):
         self._register_hook()
 
     def _register_hook(self):
-        model = self.llm.base_model.model.model if hasattr(self.llm.base_model, 'model') else self.llm
-        layers = model.model.layers
+        model = self.llm
+        if hasattr(model, 'base_model'):
+            model = model.base_model.model
+        if hasattr(model, 'model'):
+            model = model.model
+        layers = model.layers
 
         def hook_fn(module, input, output):
             if isinstance(output, tuple):

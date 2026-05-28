@@ -300,6 +300,7 @@ def evaluate(config, timestamp):
         soft_label_weight=saved_config.soft_label_weight,
         soft_label_temperature=saved_config.soft_label_temperature,
         use_residual=saved_config.use_residual,
+        use_4bit=getattr(saved_config, 'use_4bit', True),
     )
 
     from peft import PeftModel
@@ -556,6 +557,7 @@ def main():
             soft_label_weight=config.soft_label_weight,
             soft_label_temperature=config.soft_label_temperature,
             use_residual=config.use_residual,
+            use_4bit=config.use_4bit,
         )
 
         print(f">>> Training...")

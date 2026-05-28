@@ -25,6 +25,7 @@ class SCBMLLMConfig:
     concept_layer_idx = 20
     concept_loss_weight = 0.1
     use_residual = True
+    use_4bit = True
 
     soft_label_weight = 0.5
     soft_label_temperature = 2.0
