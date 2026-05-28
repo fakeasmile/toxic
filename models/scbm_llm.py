@@ -39,26 +39,34 @@ class SCBMLLMModel(nn.Module):
         self.soft_label_temperature = soft_label_temperature
         self.use_residual = use_residual
 
+        load_kwargs = {
+            "trust_remote_code": True,
+            "device_map": "auto",
+            "torch_dtype": torch.float16,
+        }
+
         if use_4bit:
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                device_map="auto",
-                quantization_config=bnb_config,
-                torch_dtype=torch.float16,
-            )
+            try:
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                )
+                self.llm = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    quantization_config=bnb_config,
+                    **load_kwargs,
+                )
+            except ValueError:
+                self.llm = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    **load_kwargs,
+                )
         else:
             self.llm = AutoModelForCausalLM.from_pretrained(
                 model_name,
-                trust_remote_code=True,
-                device_map="auto",
-                torch_dtype=torch.float16,
+                **load_kwargs,
             )
 
         hidden_dim = self.llm.config.hidden_size
