@@ -26,6 +26,14 @@ class HECDNetConfig:
         self.num_targets = 5      # multi-label
         self.num_platforms = 2    # zhihu, tieba
 
+    def set_dataset(self, dataset_name):
+        self.dataset_name = dataset_name
+        if dataset_name == "COLD":
+            self.num_topics = 3       # race, gender, region (no lgbt)
+            self.num_expressions = 1  # COLD has no expression field
+            self.num_targets = 1      # COLD has no target field
+            self.num_platforms = 1    # COLD has no platform field
+
         # ========== 模型配置 ==========
         self.plm_hidden_size = 768
         self.concept_dim = 64

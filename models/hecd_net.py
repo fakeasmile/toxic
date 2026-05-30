@@ -353,11 +353,11 @@ class HECDNet(nn.Module):
             loss = self.ce_loss(logits_toxic, labels)
 
             if self.use_auxiliary:
-                if topic_labels is not None:
+                if topic_labels is not None and self.head_topic is not None and self.head_topic.out_features > 1:
                     loss = loss + 0.3 * self.ce_loss(aux_logits["topic"], topic_labels)
-                if expression_labels is not None:
+                if expression_labels is not None and self.head_expression is not None and self.head_expression.out_features > 1:
                     loss = loss + 0.3 * self.ce_loss(aux_logits["expression"], expression_labels)
-                if target_labels is not None:
+                if target_labels is not None and self.head_target is not None and self.head_target.out_features > 1:
                     loss = loss + 0.3 * self.bce_loss(aux_logits["target"], target_labels.float())
 
         outputs_dict = {

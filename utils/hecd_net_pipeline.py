@@ -29,6 +29,7 @@ from transformers import get_linear_schedule_with_warmup
 from transformers import AutoTokenizer
 from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
 
@@ -45,15 +46,18 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 
 # Platform / Topic 映射
 PLATFORM_MAP = {"zhihu": 0, "tieba": 1}
-TOPIC_MAP = {"race": 0, "gender": 1, "region": 2, "lgbt": 3}
+TOPIC_MAP_TOXICN = {"race": 0, "gender": 1, "region": 2, "lgbt": 3}
+TOPIC_MAP_COLD = {"race": 0, "gender": 1, "region": 2}
 
 
 class TOXICNDataset(Dataset):
-    """TOXICN 数据集，返回原始文本和全部标注"""
-    def __init__(self, data, tokenizer, max_length=128):
+    """TOXICN/COLD 数据集，返回原始文本和全部标注"""
+    def __init__(self, data, tokenizer, max_length=128, dataset_name="TOXICN"):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.dataset_name = dataset_name
+        self.topic_map = TOPIC_MAP_COLD if dataset_name == "COLD" else TOPIC_MAP_TOXICN
 
     def __len__(self):
         return len(self.data)
@@ -61,6 +65,8 @@ class TOXICNDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         content = item["content"]
+        if not isinstance(content, str) or len(content.strip()) == 0:
+            content = "无内容"
         toxic = item["toxic"]
 
         # Tokenize
@@ -73,13 +79,18 @@ class TOXICNDataset(Dataset):
         )
 
         # Platform / Topic
-        platform_id = PLATFORM_MAP.get(item.get("platform", "zhihu"), 0)
-        topic_id = TOPIC_MAP.get(item.get("topic", "race"), 0)
+        if self.dataset_name == "COLD":
+            platform_id = 0
+            topic_id = self.topic_map.get(item.get("topic", "race"), 0)
+            expression_label = 0
+            target_vec = [0.0]
+        else:
+            platform_id = PLATFORM_MAP.get(item.get("platform", "zhihu"), 0)
+            topic_id = self.topic_map.get(item.get("topic", "race"), 0)
+            expression_label = item.get("expression", 0)
+            target_vec = item.get("target", [0, 0, 0, 0, 0])
 
-        # 辅助标注
-        topic_label = topic_id  # 主topic作为topic分类标签
-        expression_label = item.get("expression", 0)
-        target_vec = item.get("target", [0, 0, 0, 0, 0])
+        topic_label = topic_id
 
         return {
             "input_ids": encoding["input_ids"].squeeze(0),
@@ -106,6 +117,7 @@ def collate_fn(batch):
 def parse_args():
     parser = argparse.ArgumentParser(description="HECD-Net 训练与测试流水线")
     parser.add_argument('--mode', type=str, choices=['all', 'train', 'test'], default='all')
+    parser.add_argument('--dataset_name', type=str, default='TOXICN', choices=['TOXICN', 'COLD'], help='数据集名称')
     parser.add_argument('--timestamp', type=str, default=None, help='测试模式时间戳')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=None)
@@ -123,6 +135,7 @@ def parse_args():
 
 def update_config(args):
     cfg = HECDNetConfig()
+    cfg.set_dataset(args.dataset_name)
     if args.seed is not None:
         cfg.seed = args.seed
     if args.batch_size is not None:
@@ -148,7 +161,7 @@ def update_config(args):
     return cfg
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, config):
+def train_epoch(model, dataloader, optimizer, scheduler, device, config, epoch=None):
     model.train()
     total_loss = 0.0
     total_ce = 0.0
@@ -157,7 +170,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, config):
 
     optimizer.zero_grad()
 
-    for step, batch in enumerate(dataloader):
+    desc = f"Epoch {epoch}" if epoch is not None else "Train"
+    pbar = tqdm(dataloader, desc=desc, leave=False)
+
+    for step, batch in enumerate(pbar):
         for k in batch:
             batch[k] = batch[k].to(device)
 
@@ -197,17 +213,21 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, config):
         total_loss += loss.item() * config.gradient_accumulation_steps
         total_ce += outputs["loss"].item()
 
+        pbar.set_postfix(loss=f"{loss.item() * config.gradient_accumulation_steps:.4f}")
+
     avg_loss = total_loss / len(dataloader)
     return avg_loss
 
 
 @torch.no_grad()
-def evaluate_epoch(model, dataloader, device):
+def evaluate_epoch(model, dataloader, device, desc="Val"):
     model.eval()
     all_preds, all_labels = [], []
     total_loss = 0.0
 
-    for batch in dataloader:
+    pbar = tqdm(dataloader, desc=desc, leave=False)
+
+    for batch in pbar:
         for k in batch:
             batch[k] = batch[k].to(device)
 
@@ -223,6 +243,8 @@ def evaluate_epoch(model, dataloader, device):
         preds = torch.argmax(outputs["logits_toxic"], dim=1)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(batch["labels"].cpu().numpy())
+
+        pbar.set_postfix(loss=f"{outputs['loss'].item():.4f}")
 
     avg_loss = total_loss / len(dataloader)
     f1 = f1_score(all_labels, all_preds, average='macro')
@@ -268,13 +290,13 @@ def train_model(config, train_dataset, val_dataset):
     tokenizer = AutoTokenizer.from_pretrained(plm_path)
 
     train_loader = DataLoader(
-        TOXICNDataset(train_dataset, tokenizer, config.max_length),
+        TOXICNDataset(train_dataset, tokenizer, config.max_length, config.dataset_name),
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=collate_fn
     )
     val_loader = DataLoader(
-        TOXICNDataset(val_dataset, tokenizer, config.max_length),
+        TOXICNDataset(val_dataset, tokenizer, config.max_length, config.dataset_name),
         batch_size=config.batch_size,
         shuffle=False,
         collate_fn=collate_fn
@@ -330,8 +352,8 @@ def train_model(config, train_dataset, val_dataset):
     epoch_list = []
 
     for epoch in range(config.epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, config)
-        val_loss, val_f1, val_p, val_r = evaluate_epoch(model, val_loader, device)
+        train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, config, epoch=epoch+1)
+        val_loss, val_f1, val_p, val_r = evaluate_epoch(model, val_loader, device, desc=f"Val {epoch+1}")
 
         epoch_list.append(epoch + 1)
         train_losses.append(train_loss)
@@ -381,7 +403,7 @@ def test_model(config, timestamp):
     # 加载测试数据
     test_data = load_raw_data(config.raw_data_path / config.dataset_name / "test.json")
     test_loader = DataLoader(
-        TOXICNDataset(test_data, tokenizer, saved_cfg_dict.get("max_length", 128)),
+        TOXICNDataset(test_data, tokenizer, saved_cfg_dict.get("max_length", 128), saved_cfg_dict.get("dataset_name", "TOXICN")),
         batch_size=saved_cfg_dict.get("batch_size", 16),
         shuffle=False,
         collate_fn=collate_fn
