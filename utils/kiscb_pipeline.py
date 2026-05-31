@@ -11,6 +11,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score, classificat
 from sklearn.model_selection import train_test_split
 import matplotlib
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 project_root = Path(__file__).parent.parent
@@ -19,7 +20,6 @@ if str(project_root) not in sys.path:
 
 from configs.KISCB_config import KISCBConfig
 from models.kiscb import KISCB
-from models.knowledge_preprocessor import CodedTermRecognizer
 from utils.seed import set_reproducibility
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
@@ -53,9 +53,6 @@ def parse_args():
     parser.add_argument('--lambda_toxic', type=float, default=None)
     parser.add_argument('--lambda_target', type=float, default=None)
     parser.add_argument('--lambda_strategy', type=float, default=None)
-    parser.add_argument('--lambda_intent', type=float, default=None)
-    parser.add_argument('--lambda_tone', type=float, default=None)
-    parser.add_argument('--lambda_consistency', type=float, default=None)
 
     return parser.parse_args()
 
@@ -91,36 +88,18 @@ def update_config(args):
         config.lambda_target = args.lambda_target
     if args.lambda_strategy is not None:
         config.lambda_strategy = args.lambda_strategy
-    if args.lambda_intent is not None:
-        config.lambda_intent = args.lambda_intent
-    if args.lambda_tone is not None:
-        config.lambda_tone = args.lambda_tone
-    if args.lambda_consistency is not None:
-        config.lambda_consistency = args.lambda_consistency
 
     return config
 
 
 class TOXICNDataset(Dataset):
-    def __init__(self, data, tokenizer, recognizer, max_length, platform_map, topic_map):
+    def __init__(self, data, tokenizer, max_length, platform_map, topic_map):
         self.samples = []
 
-        contents = [item["content"] for item in data]
-        coded_term_features = recognizer.forward(contents)
-
-        for i, item in enumerate(data):
-            encoding_orig = tokenizer(
-                contents[i], max_length=max_length, padding='max_length',
-                truncation=True, return_tensors='pt'
-            )
-
-            matched_terms = recognizer.match_terms(contents[i])
-            if matched_terms:
-                enhanced_text = contents[i] + " " + " ".join(matched_terms)
-            else:
-                enhanced_text = contents[i]
-            encoding_enhanced = tokenizer(
-                enhanced_text, max_length=max_length, padding='max_length',
+        for item in data:
+            content = item["content"]
+            encoding = tokenizer(
+                content, max_length=max_length, padding='max_length',
                 truncation=True, return_tensors='pt'
             )
 
@@ -130,22 +109,15 @@ class TOXICNDataset(Dataset):
             toxic_label = item["toxic"]
             expression_label = item.get("expression", 0)
             target_label = item.get("target", [0] * 5)
-            intent_label = item.get("intent", [0.0] * 5)
-            tone_label = item.get("tone", 0)
 
             self.samples.append({
-                "input_ids_orig": encoding_orig["input_ids"].squeeze(0),
-                "attention_mask_orig": encoding_orig["attention_mask"].squeeze(0),
-                "input_ids_enhanced": encoding_enhanced["input_ids"].squeeze(0),
-                "attention_mask_enhanced": encoding_enhanced["attention_mask"].squeeze(0),
-                "coded_term_features": coded_term_features[i],
+                "input_ids": encoding["input_ids"].squeeze(0),
+                "attention_mask": encoding["attention_mask"].squeeze(0),
                 "platform_id": torch.tensor(platform_id, dtype=torch.long),
                 "topic_id": torch.tensor(topic_id, dtype=torch.long),
                 "toxic_label": torch.tensor(toxic_label, dtype=torch.long),
                 "expression_label": torch.tensor(expression_label, dtype=torch.long),
                 "target_label": torch.tensor(target_label, dtype=torch.float),
-                "intent_label": torch.tensor(intent_label, dtype=torch.float),
-                "tone_label": torch.tensor(tone_label, dtype=torch.long),
             })
 
     def __len__(self):
@@ -154,75 +126,46 @@ class TOXICNDataset(Dataset):
     def __getitem__(self, idx):
         s = self.samples[idx]
         return (
-            s["input_ids_orig"],
-            s["attention_mask_orig"],
-            s["input_ids_enhanced"],
-            s["attention_mask_enhanced"],
-            s["coded_term_features"],
+            s["input_ids"],
+            s["attention_mask"],
             s["platform_id"],
             s["topic_id"],
             s["toxic_label"],
             s["expression_label"],
             s["target_label"],
-            s["intent_label"],
-            s["tone_label"],
         )
 
 
-def load_data(config, mode, tokenizer, recognizer):
+def load_data(config, mode, tokenizer):
     data_path = Path(config.raw_data_path) / config.dataset_name / f"{mode}.json"
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return TOXICNDataset(data, tokenizer, recognizer, config.max_length,
-                         PLATFORM_MAP, TOPIC_MAP)
+    return TOXICNDataset(data, tokenizer, config.max_length, PLATFORM_MAP, TOPIC_MAP)
 
 
 def compute_loss(config, model, batch, ce_criterion, bce_criterion, device):
-    (input_ids_orig, attention_mask_orig, input_ids_enhanced, attention_mask_enhanced,
-     coded_term_features, platform_ids, topic_ids, toxic_labels,
-     expression_labels, target_labels, intent_labels, tone_labels) = batch
+    (input_ids, attention_mask, platform_ids, topic_ids,
+     toxic_labels, expression_labels, target_labels) = batch
 
-    input_ids_orig = input_ids_orig.to(device)
-    attention_mask_orig = attention_mask_orig.to(device)
-    input_ids_enhanced = input_ids_enhanced.to(device)
-    attention_mask_enhanced = attention_mask_enhanced.to(device)
-    coded_term_features = coded_term_features.to(device)
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
     platform_ids = platform_ids.to(device)
     topic_ids = topic_ids.to(device)
     toxic_labels = toxic_labels.to(device)
     expression_labels = expression_labels.to(device)
     target_labels = target_labels.to(device).float()
-    intent_labels = intent_labels.to(device).float()
-    tone_labels = tone_labels.to(device)
 
-    logits, target_probs, strategy_logits, intent_probs, tone_logits = model(
-        input_ids_orig, attention_mask_orig, input_ids_enhanced, attention_mask_enhanced,
-        coded_term_features, platform_ids, topic_ids
+    logits, target_probs, strategy_logits = model(
+        input_ids, attention_mask, platform_ids, topic_ids
     )
 
     loss_toxic = ce_criterion(logits, toxic_labels)
     loss_target = bce_criterion(target_probs, target_labels)
     loss_strategy = ce_criterion(strategy_logits, expression_labels)
 
-    if config.lambda_intent > 0:
-        loss_intent = bce_criterion(intent_probs, intent_labels)
-    else:
-        loss_intent = torch.tensor(0.0, device=device)
-
-    if config.lambda_tone > 0:
-        loss_tone = ce_criterion(tone_logits, tone_labels)
-    else:
-        loss_tone = torch.tensor(0.0, device=device)
-
-    toxic_prob = torch.softmax(logits, dim=-1)[:, 1]
-    consistency_loss = torch.relu(toxic_prob - intent_probs.max(dim=-1).values).mean()
-
     total_loss = (config.lambda_toxic * loss_toxic
                   + config.lambda_target * loss_target
-                  + config.lambda_strategy * loss_strategy
-                  + config.lambda_intent * loss_intent
-                  + config.lambda_tone * loss_tone
-                  + config.lambda_consistency * consistency_loss)
+                  + config.lambda_strategy * loss_strategy)
 
     return total_loss, logits, toxic_labels
 
@@ -235,16 +178,12 @@ def train(config, train_dataset, val_dataset, test_dataset):
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
-    num_coded_terms = train_dataset[0][4].shape[0]
     model = KISCB(
         plm_name=config.plm_name,
-        num_coded_terms=num_coded_terms,
         num_platforms=config.num_platforms,
         num_topics=config.num_topics,
         num_targets=config.num_targets,
         num_strategies=config.num_strategies,
-        num_intents=config.num_intents,
-        num_tones=config.num_tones,
         concept_emb_dim=config.concept_emb_dim,
         dropout_rate=config.dropout_rate,
     ).to(device)
@@ -280,22 +219,26 @@ def train(config, train_dataset, val_dataset, test_dataset):
 
     for epoch in range(config.epochs):
         model.train()
-        for batch in train_loader:
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config.epochs} [Train]", leave=False)
+        for batch in train_pbar:
             optimizer.zero_grad()
             total_loss, _, _ = compute_loss(config, model, batch, ce_criterion, bce_criterion, device)
             total_loss.backward()
             optimizer.step()
             scheduler.step()
+            train_pbar.set_postfix(loss=f"{total_loss.item():.4f}")
 
         model.eval()
         val_preds, val_labels_list = [], []
         total_val_loss = 0.0
+        val_pbar = tqdm(val_loader, desc=f"Epoch {epoch + 1}/{config.epochs} [Val]", leave=False)
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in val_pbar:
                 val_loss, logits, toxic_labels = compute_loss(config, model, batch, ce_criterion, bce_criterion, device)
                 total_val_loss += val_loss.item()
                 val_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
                 val_labels_list.extend(toxic_labels.cpu().numpy())
+                val_pbar.set_postfix(loss=f"{val_loss.item():.4f}")
 
         avg_val_loss = total_val_loss / len(val_loader)
         val_f1 = f1_score(val_labels_list, val_preds, average='macro')
@@ -304,12 +247,14 @@ def train(config, train_dataset, val_dataset, test_dataset):
 
         test_preds, test_labels_list = [], []
         total_test_loss = 0.0
+        test_pbar = tqdm(test_loader, desc=f"Epoch {epoch + 1}/{config.epochs} [Test]", leave=False)
         with torch.no_grad():
-            for batch in test_loader:
+            for batch in test_pbar:
                 t_loss, logits, toxic_labels = compute_loss(config, model, batch, ce_criterion, bce_criterion, device)
                 total_test_loss += t_loss.item()
                 test_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
                 test_labels_list.extend(toxic_labels.cpu().numpy())
+                test_pbar.set_postfix(loss=f"{t_loss.item():.4f}")
 
         avg_test_loss = total_test_loss / len(test_loader)
         test_f1 = f1_score(test_labels_list, test_preds, average='macro')
@@ -362,9 +307,8 @@ def evaluate(config, timestamp):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     tokenizer = AutoTokenizer.from_pretrained(saved_config.plm_name)
-    recognizer = CodedTermRecognizer(str(saved_config.toxic_lexicon_path))
 
-    test_dataset = load_data(saved_config, "test", tokenizer, recognizer)
+    test_dataset = load_data(saved_config, "test", tokenizer)
     test_loader = DataLoader(test_dataset, batch_size=int(saved_config.batch_size), shuffle=False)
 
     data_path = Path(saved_config.raw_data_path) / saved_config.dataset_name / "test.json"
@@ -372,16 +316,12 @@ def evaluate(config, timestamp):
         raw_data = json.load(f)
     contents = [item["content"] for item in raw_data]
 
-    num_coded_terms = len(recognizer.terms)
     model = KISCB(
         plm_name=saved_config.plm_name,
-        num_coded_terms=num_coded_terms,
         num_platforms=saved_config.num_platforms,
         num_topics=saved_config.num_topics,
         num_targets=saved_config.num_targets,
         num_strategies=saved_config.num_strategies,
-        num_intents=saved_config.num_intents,
-        num_tones=saved_config.num_tones,
         concept_emb_dim=saved_config.concept_emb_dim,
         dropout_rate=saved_config.dropout_rate,
     )
@@ -389,23 +329,17 @@ def evaluate(config, timestamp):
     model.to(device).eval()
 
     all_preds, all_labels = [], []
+    eval_pbar = tqdm(test_loader, desc="Evaluating", leave=False)
     with torch.no_grad():
-        for batch in test_loader:
-            (input_ids_orig, attention_mask_orig, input_ids_enhanced, attention_mask_enhanced,
-             coded_term_features, platform_ids, topic_ids, toxic_labels, *_) = batch
+        for batch in eval_pbar:
+            (input_ids, attention_mask, platform_ids, topic_ids, toxic_labels, *_) = batch
 
-            input_ids_orig = input_ids_orig.to(device)
-            attention_mask_orig = attention_mask_orig.to(device)
-            input_ids_enhanced = input_ids_enhanced.to(device)
-            attention_mask_enhanced = attention_mask_enhanced.to(device)
-            coded_term_features = coded_term_features.to(device)
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
             platform_ids = platform_ids.to(device)
             topic_ids = topic_ids.to(device)
 
-            logits, _, _, _, _ = model(
-                input_ids_orig, attention_mask_orig, input_ids_enhanced, attention_mask_enhanced,
-                coded_term_features, platform_ids, topic_ids
-            )
+            logits, _, _ = model(input_ids, attention_mask, platform_ids, topic_ids)
             preds = torch.argmax(logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(toxic_labels.numpy())
@@ -501,8 +435,6 @@ def main():
         config.experiment_path = experiment_dir
 
         tokenizer = AutoTokenizer.from_pretrained(config.plm_name)
-        recognizer = CodedTermRecognizer(str(config.toxic_lexicon_path))
-        num_coded_terms = len(recognizer.terms)
 
         config_dict = {
             "timestamp": timestamp,
@@ -510,9 +442,6 @@ def main():
             "raw_data_path": str(config.raw_data_path),
             "processed_path": str(config.processed_path),
             "models_path": str(config.models_path),
-            "homo_graph_path": str(config.homo_graph_path),
-            "toxic_lexicon_path": str(config.toxic_lexicon_path),
-            "coded_terms_path": str(config.coded_terms_path),
             "dataset_name": config.dataset_name,
             "seed": config.seed,
             "use_deterministic": config.use_deterministic,
@@ -522,9 +451,6 @@ def main():
             "num_topics": config.num_topics,
             "num_targets": config.num_targets,
             "num_strategies": config.num_strategies,
-            "num_intents": config.num_intents,
-            "num_tones": config.num_tones,
-            "num_coded_terms": num_coded_terms,
             "concept_emb_dim": config.concept_emb_dim,
             "dropout_rate": config.dropout_rate,
             "batch_size": config.batch_size,
@@ -537,9 +463,6 @@ def main():
             "lambda_toxic": config.lambda_toxic,
             "lambda_target": config.lambda_target,
             "lambda_strategy": config.lambda_strategy,
-            "lambda_intent": config.lambda_intent,
-            "lambda_tone": config.lambda_tone,
-            "lambda_consistency": config.lambda_consistency,
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)
@@ -551,8 +474,8 @@ def main():
         else:
             print(">>> 已禁用确定性模式 (Randomness Enabled), 结果将不可复现")
 
-        train_dataset = load_data(config, "train", tokenizer, recognizer)
-        test_dataset = load_data(config, "test", tokenizer, recognizer)
+        train_dataset = load_data(config, "train", tokenizer)
+        test_dataset = load_data(config, "test", tokenizer)
 
         train_indices, val_indices = train_test_split(
             range(len(train_dataset)),

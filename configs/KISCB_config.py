@@ -16,7 +16,7 @@ class KISCBConfig():
         self.seed = 1
         self.use_deterministic = False
 
-        self.plm_name = "chinese-roberta-wwm-ext"
+        self.plm_name = str(self.models_path / "chinese-roberta-wwm-ext")
         self.max_length = 128
 
         self.num_platforms = 2
