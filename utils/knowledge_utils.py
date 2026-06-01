@@ -101,14 +101,10 @@ def build_default_coded_terms(output_path):
 
 
 def get_platform_id(platform_str):
-    if platform_str == "zhihu":
-        return 0
-    elif platform_str == "tieba":
-        return 1
-    else:
-        return 2
+    platform_map = {"zhihu": 0, "tieba": 1}
+    return platform_map.get(platform_str, 0)
 
 
 def get_topic_id(topic_str):
-    topic_map = {"race": 0, "gender": 1, "region": 2, "lgbt": 3, "none": 4}
-    return topic_map.get(topic_str, 4)
+    topic_map = {"race": 0, "gender": 1, "region": 2, "lgbt": 3}
+    return topic_map.get(topic_str, 0)

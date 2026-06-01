@@ -4,7 +4,7 @@ from transformers import AutoModel
 
 
 class KnowledgeEnhancedClassifier(nn.Module):
-    def __init__(self, roberta_path, num_coded_terms=201, num_platforms=3,
+    def __init__(self, roberta_path, num_coded_terms=201, num_platforms=2,
                  coded_emb_dim=64, platform_emb_dim=32, use_dual_encoder=True,
                  use_coded_terms=True, use_homophone=True, use_multitask=True,
                  use_platform=True, num_topics=5, num_expressions=3):

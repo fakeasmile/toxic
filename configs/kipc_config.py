@@ -19,9 +19,9 @@ class KIPCConfig:
 
         self.dataset_name = "TOXICN"
 
-        self.topic_map = {"race": 0, "gender": 1, "region": 2, "lgbt": 3, "none": 4}
-        self.num_topics = 5
-        self.num_expressions = 3
+        self.topic_map = {"race": 0, "gender": 1, "region": 2, "lgbt": 3}
+        self.num_topics = 4
+        self.num_expressions = 4
         self.num_targets = 5
 
         self.max_len = 128

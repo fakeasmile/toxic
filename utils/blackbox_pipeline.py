@@ -391,7 +391,7 @@ def train(config, train_dataset, val_dataset, test_dataset):
     model = KnowledgeEnhancedClassifier(
         roberta_path=config.roberta_path,
         num_coded_terms=config.num_coded_terms if config.use_coded_terms else 1,
-        num_platforms=3 if config.use_platform else 1,
+        num_platforms=2 if config.use_platform else 1,
         coded_emb_dim=config.coded_term_emb_dim,
         platform_emb_dim=config.platform_emb_dim,
         use_dual_encoder=config.use_dual_encoder,
@@ -516,7 +516,7 @@ def evaluate(config, timestamp):
     model = KnowledgeEnhancedClassifier(
         roberta_path=Path(saved_config.roberta_path),
         num_coded_terms=saved_config.num_coded_terms if saved_config.use_coded_terms else 1,
-        num_platforms=3 if saved_config.use_platform else 1,
+        num_platforms=2 if saved_config.use_platform else 1,
         coded_emb_dim=saved_config.coded_term_emb_dim,
         platform_emb_dim=saved_config.platform_emb_dim,
         use_dual_encoder=saved_config.use_dual_encoder,
