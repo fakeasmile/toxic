@@ -64,6 +64,8 @@ models/chinese-roberta-*/
 .catpaw/
 docs/
 scripts/encode_tokens_qwen.py
+models/bge-*/
+models/Qwen3.5-*/
 
 # Data & Experiments
 data/
