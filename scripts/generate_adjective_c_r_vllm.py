@@ -197,24 +197,14 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     if effective_quantization is not None:
         llm_kwargs["quantization"] = effective_quantization
 
-    # Qwen3.5系列是原生多模态模型，纯文本推理时需跳过视觉编码器以节省显存
-    # 参考：https://www.modelscope.cn/models/Qwen/Qwen3.5-9B
-    # 同时进行以下优化以适配16GB显存显卡（如RTX A4000）：
-    # 1. enforce_eager=True：跳过CUDA Graph录制（Qwen3.5的GDN架构录制非常耗时）
-    # 2. max_num_seqs=64：减少并发序列数，降低KV Cache预分配显存
-    # 3. max_model_len=1024：缩短上下文长度，进一步减少KV Cache占用
-    # 注意：保留enable_prefix_caching=True，因为同一文本的236个prompt共享相同前缀，
-    # 前缀缓存可复用KV Cache，既加速推理又节省显存
+    # Qwen3.5系列是原生多模态模型，纯文本推理时设置limit_mm_per_prompt限制多模态输入。
+    # 注意：只保留limit_mm_per_prompt，不修改max_num_seqs/max_model_len/enforce_eager。
+    # 之前设置的enforce_eager=True会禁用CUDA Graph（vLLM核心加速机制），
+    # max_num_seqs=64会强制将236个prompt拆分为4批调度，两者叠加导致推理速度慢6倍。
+    # vLLM的PagedAttention采用按需分配KV Cache，增大max_num_seqs不会一次性占满显存。
     if is_multimodal_model(model_name):
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
-        llm_kwargs["enforce_eager"] = True
-        llm_kwargs["max_num_seqs"] = 64
-        llm_kwargs["max_model_len"] = 1024
-        print(f"检测到多模态模型({model_name})，已启用纯文本推理优化：")
-        print(f"  - limit_mm_per_prompt: 跳过视觉编码器")
-        print(f"  - enforce_eager: 跳过CUDA Graph录制")
-        print(f"  - max_num_seqs=64, max_model_len=1024: 降低显存占用适配16GB显卡")
-        print(f"  - enable_prefix_caching: 保留，复用前缀KV Cache加速推理")
+        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt限制多模态输入")
 
     print(f"Loading vLLM model from {llm_path}")
     print(f"  量化方式: {effective_quantization if effective_quantization else '无量化'}")
