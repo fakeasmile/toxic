@@ -17,10 +17,11 @@
 - inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率，即LLM的首token是否将概率质量分配给verbalizer token词表
 
 使用示例：
-# 无量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct
-# AWQ量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --quantization awq
+# Qwen2.5-7B-Instruct-AWQ（AWQ 4-bit预量化权重，量化方式自动检测，无需指定--quantization）
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ
+# Qwen3.5-9B（多模态模型，仅使用文本推理；当前无官方预量化版本，必须指定--quantization进行在线量化以节省显存；
+#   自动：1)禁用thinking 2)跳过视觉编码器节省显存）
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen3.5-9B --quantization awq
 """
 
 import argparse
@@ -89,8 +90,10 @@ def parse_args():
         '--quantization',
         type=str,
         default=None,
-        choices=[None, 'awq', 'fp8'],
-        help='量化方法：awq/fp8，None表示不使用量化（默认）'
+        choices=[None, 'awq', 'fp8', 'gptq'],
+        help='量化方法：awq/fp8/gptq，None表示不使用量化（默认）。'
+             '预量化权重（如Qwen2.5-7B-Instruct-AWQ）无需指定，自动从config.json检测；'
+             '全量权重（如Qwen3.5-9B）必须手动指定--quantization进行在线量化以节省显存。'
     )
 
     parser.add_argument(
@@ -104,14 +107,59 @@ def parse_args():
 
 
 def is_qwen3_plus(model_name: str) -> bool:
+    """检测是否为Qwen3+系列模型（包括Qwen3、Qwen3.5等）"""
     return model_name.startswith("Qwen3")
 
 
+def is_multimodal_model(model_name: str) -> bool:
+    """检测是否为多模态模型（如Qwen3.5-9B，含Vision Encoder）
+    
+    Qwen3.5系列是原生多模态模型，纯文本推理时需设置limit_mm_per_prompt跳过视觉编码器以节省显存。
+    Qwen2.5系列是纯文本模型，不需要此参数。
+    """
+    return model_name.startswith("Qwen3.5")
+
+
+def detect_quantization_from_config(llm_path: Path) -> str | None:
+    """从模型config.json中自动检测量化配置
+    
+    对于预量化权重（如Qwen2.5-7B-Instruct-AWQ），模型目录中的config.json
+    已包含quantization_config字段，此时不需要用户手动指定--quantization参数。
+    """
+    config_path = llm_path / "config.json"
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            model_config = json.load(f)
+        if "quantization_config" in model_config:
+            return model_config["quantization_config"].get("quant_method", None)
+    return None
+
+
 def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85, quantization: str = None):
-    """加载vLLM模型和tokenizer"""
+    """加载vLLM模型和tokenizer
+    
+    自动适配不同模型系列：
+    - Qwen2.5-7B-Instruct-AWQ：纯文本模型，AWQ 4-bit预量化权重，量化方式自动检测
+    - Qwen3.5-9B：多模态模型（仅使用文本推理），当前无官方预量化版本，必须通过--quantization
+      指定在线量化方式（如awq）以节省显存；纯文本推理时跳过视觉编码器
+    
+    关键差异处理：
+    1. 量化检测：预量化权重自动从config.json读取quantization_config，无需手动指定；
+       全量权重（如Qwen3.5-9B）需用户通过--quantization手动指定在线量化方式
+    2. 多模态模型：Qwen3.5系列设置limit_mm_per_prompt跳过视觉编码器
+    3. 数据类型：Qwen3.5-9B原版权重为bfloat16，在不支持bf16的GPU(如3080Ti)上需使用float16
+    """
     llm_path = model_path / model_name
     if not llm_path.exists():
         raise ValueError(f"LLM path {llm_path} does not exist")
+
+    # 量化方式检测：优先使用用户指定的量化方式，否则自动从config.json检测
+    effective_quantization = quantization
+    if effective_quantization is None:
+        auto_detected = detect_quantization_from_config(llm_path)
+        if auto_detected:
+            effective_quantization = auto_detected
+            print(f"检测到模型自带量化配置: {auto_detected}")
 
     print(f"Loading tokenizer from {llm_path}")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -122,18 +170,28 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"Loading vLLM model from {llm_path}")
-    llm = LLM(
+    # 构建vLLM加载参数
+    llm_kwargs = dict(
         model=str(llm_path),
         trust_remote_code=True,
         dtype="auto",
-        quantization=quantization,
+        quantization=effective_quantization,
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
         max_num_seqs=256,
         max_num_batched_tokens=4096,
     )
+
+    # Qwen3.5系列是原生多模态模型，纯文本推理时需跳过视觉编码器以节省显存
+    # 参考：https://www.modelscope.cn/models/Qwen/Qwen3.5-9B
+    if is_multimodal_model(model_name):
+        llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt跳过视觉编码器")
+
+    print(f"Loading vLLM model from {llm_path}")
+    print(f"  量化方式: {effective_quantization if effective_quantization else '无量化'}")
+    llm = LLM(**llm_kwargs)
 
     return tokenizer, llm
 
@@ -321,6 +379,9 @@ def main():
     qwen3_flag = is_qwen3_plus(args.model_name)
     if qwen3_flag:
         print(f"检测到Qwen3+模型({args.model_name})，已禁用思考模式(enable_thinking=False)")
+    multimodal_flag = is_multimodal_model(args.model_name)
+    if multimodal_flag:
+        print(f"检测到多模态模型({args.model_name})，纯文本推理模式下已跳过视觉编码器")
     generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
 
     print("生成完成")
