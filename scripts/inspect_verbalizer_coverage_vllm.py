@@ -143,9 +143,15 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         llm_kwargs["quantization"] = effective_quantization
 
     # Qwen3.5系列是原生多模态模型，纯文本推理时需跳过视觉编码器以节省显存
+    # 同时优化显存占用以适配16GB显卡：
+    # enforce_eager=True跳过CUDA Graph，max_num_seqs/max_model_len降低KV Cache
+    # 保留enable_prefix_caching以复用前缀KV Cache
     if is_multimodal_model(model_name):
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
-        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt跳过视觉编码器")
+        llm_kwargs["enforce_eager"] = True
+        llm_kwargs["max_num_seqs"] = 64
+        llm_kwargs["max_model_len"] = 1024
+        print(f"检测到多模态模型({model_name})，已启用纯文本推理优化（跳过视觉编码器+CUDA Graph+降低显存占用，保留前缀缓存）")
 
     print(f"Loading vLLM model from {llm_path}")
     print(f"  量化方式: {effective_quantization if effective_quantization else '无量化'}")
