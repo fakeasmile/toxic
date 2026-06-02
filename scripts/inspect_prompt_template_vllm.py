@@ -86,6 +86,10 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     return tokenizer, llm
 
 
+def is_qwen3_plus(model_name: str) -> bool:
+    return model_name.startswith("Qwen3")
+
+
 def get_first_token_ids(word_list, tokenizer):
     """获取词表中每个词的首token id"""
     token_ids = []
@@ -138,10 +142,13 @@ def main():
     )
 
     # 生成完整prompt文本
+    qwen3_flag = is_qwen3_plus(MODEL_NAME)
+    chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
     prompt = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True
+        add_generation_prompt=True,
+        **chat_template_kwargs
     )
 
     print("\n" + "=" * 60)

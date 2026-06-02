@@ -108,6 +108,10 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     return tokenizer, llm
 
 
+def is_qwen3_plus(model_name: str) -> bool:
+    return model_name.startswith("Qwen3")
+
+
 def get_first_token_ids(word_list, tokenizer):
     """获取词表中每个词的首token id（去重）"""
     token_ids = []
@@ -143,6 +147,7 @@ def analyze_verbalizer_coverage(
     llm_model,
     output_dir: Path,
     model_name: str,
+    is_qwen3=False,
 ):
     """
     对单条文本遍历所有形容词，使用 vLLM 计算 verbalizer 概率总和并可视化。
@@ -179,10 +184,12 @@ def analyze_verbalizer_coverage(
     for adj in adjectives:
         messages = build_chat_messages(instruction, text_content, adj)
 
+        chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
         prompt_text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
-            add_generation_prompt=True
+            add_generation_prompt=True,
+            **chat_template_kwargs
         )
         prompts.append(prompt_text)
 
@@ -319,6 +326,9 @@ def main():
     print("=" * 60 + "\n")
 
     tokenizer, llm_model = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION, QUANTIZATION)
+    qwen3_flag = is_qwen3_plus(MODEL_NAME)
+    if qwen3_flag:
+        print(f"检测到Qwen3+模型({MODEL_NAME})，已禁用思考模式(enable_thinking=False)")
     analyze_verbalizer_coverage(
         text_content=TEXT_CONTENT,
         adjective_path=config.adjective_path,
@@ -326,6 +336,7 @@ def main():
         llm_model=llm_model,
         output_dir=output_dir,
         model_name=MODEL_NAME,
+        is_qwen3=qwen3_flag,
     )
 
 

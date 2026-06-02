@@ -5,7 +5,7 @@
 
 使用示例:
     # 1. 训练+测试
-    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template likert --epochs 500 --patience 20
+    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --epochs 500 --patience 20
     
     # 2. 仅测试模式 (必须指定实验时间戳)
     python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
@@ -18,7 +18,7 @@
     数据集配置:
         --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
         --model_name        LLM模型名称 (默认: Qwen2.5-1.5B-Instruct)
-        --template          提示词模板类型 (默认: binary)
+        --template          提示词模板类型 (已废弃，保留参数仅兼容旧实验)
     
     随机种子:
         --seed              随机种子 (默认: 1)
@@ -112,7 +112,7 @@ def parse_args():
     # 数据集配置
     parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
     parser.add_argument('--model_name', type=str, default='Qwen2.5-1.5B-Instruct', help='LLM模型名称')
-    parser.add_argument('--template', type=str, default='likert',help='提示词模板类型')
+    parser.add_argument('--template', type=str, default='likert',help='提示词模板类型（已废弃，保留仅兼容旧实验）')
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')
@@ -149,9 +149,9 @@ def update_MLPConfig(args):
 
     # 动态生成依赖 dataset_name/model_name/template 的路径
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                     / mlp_config.model_name / mlp_config.template / "concept_train.json")
+                                     / mlp_config.model_name / "concept_train.json")
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                    / mlp_config.model_name / mlp_config.template / "concept_test.json")
+                                    / mlp_config.model_name / "concept_test.json")
 
     # 随机种子
     if args.seed is not None:

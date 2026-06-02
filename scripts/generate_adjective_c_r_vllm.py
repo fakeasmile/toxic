@@ -18,9 +18,9 @@
 
 使用示例：
 # 无量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct --template likert
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-1.5B-Instruct
 # AWQ量化推理
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --template likert --quantization awq
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --quantization awq
 """
 
 import argparse
@@ -74,9 +74,8 @@ def parse_args():
     parser.add_argument(
         '--template',
         type=str,
-        required=True,
         default='likert',
-        help='提示词模板类型'
+        help='提示词模板类型（已废弃，保留仅兼容旧实验）'
     )
 
     parser.add_argument(
@@ -102,6 +101,10 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def is_qwen3_plus(model_name: str) -> bool:
+    return model_name.startswith("Qwen3")
 
 
 def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85, quantization: str = None):
@@ -160,7 +163,7 @@ def build_chat_messages(instruction, content, adj):
     ]
     return messages
 
-def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, threshold=1e-4):
+def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, is_qwen3=False, threshold=1e-4):
     # 定义Likert verbalizer token（首token id集合）和提示词指令
     likert_tokens = ["1", "2", "3", "4", "5"]
     likert_ids = get_first_token_ids(likert_tokens, tokenizer)
@@ -203,10 +206,12 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
             messages = build_chat_messages(instruction, content, adj)
 
             # 添加<|im_start|>system,<|im_start|>user,<|im_start|>assistant特殊token
+            chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
             prompt_text = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
-                add_generation_prompt=True
+                add_generation_prompt=True,
+                **chat_template_kwargs
             )
             prompts.append(prompt_text)
 
@@ -292,7 +297,7 @@ def main():
 
     # 动态生成依赖 dataset_name/model_name 的路径
     data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"  # 原始数据集目录
-    concept_dir = config.processed_path / args.dataset_name / args.model_name / args.template  # 概念向量输出目录
+    concept_dir = config.processed_path / args.dataset_name / args.model_name  # 概念向量输出目录
     concept_dir.mkdir(parents=True, exist_ok=True)
     output_path = concept_dir / f"concept_{args.mode}.json"
     csv_output_path = concept_dir / f"concept_{args.mode}.csv"
@@ -302,7 +307,7 @@ def main():
     print("=" * 60)
     print(f"数据集名称: {args.dataset_name}")
     print(f"LLM模型名称: {args.model_name}")
-    print(f"提示词模板: {args.template}")
+    print(f"提示词模板: {args.template}（已废弃）")
     print(f"当前模式: {args.mode}")
     print(f"量化方法: {args.quantization if args.quantization else '无量化'}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
@@ -313,7 +318,10 @@ def main():
     print("=" * 60 + "\n")
 
     tokenizer, llm_model = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization, args.quantization)
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, threshold=1e-4)
+    qwen3_flag = is_qwen3_plus(args.model_name)
+    if qwen3_flag:
+        print(f"检测到Qwen3+模型({args.model_name})，已禁用思考模式(enable_thinking=False)")
+    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
 
     print("生成完成")
 
