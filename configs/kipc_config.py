@@ -29,6 +29,7 @@ class KIPCConfig:
         self.epochs = 30
         self.lr_backbone = 2e-5
         self.lr_head = 1e-3
+        self.lr_adversary = 1e-3
         self.patience = 10
         self.lambda_topic = 0.3
         self.lambda_expression = 0.3
@@ -45,6 +46,18 @@ class KIPCConfig:
 
         self.homo_dict_path = self.raw_data_path / "adjective" / "homophone_map.json"
         self.coded_terms_path = self.raw_data_path / "adjective" / "coded_terms.json"
+
+        self.use_supcon = True
+        self.lambda_supcon = 0.5
+        self.supcon_temperature = 0.07
+        self.projection_dim = 128
+
+        self.use_adversary = True
+        self.lambda_adv = 0.5
+        self.adv_warmup_epochs = 3
+
+        self.use_curriculum = True
+        self.curriculum_strategy = "linear"
 
     def __repr__(self):
         lines = [f"{self.__class__.__name__}:"]

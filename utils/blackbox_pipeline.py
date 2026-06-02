@@ -1,60 +1,23 @@
-"""知识增强黑盒分类器训练与测试流水线（Phase 1 of KIPC-CBM）
+"""TAD-CL (Topic-Adversarial Debiasing + Contrastive Learning) 训练流水线
 
-整合训练和测试功能，实现训练完成后自动测试的流水线。
-支持命令行参数配置，确保训练-测试配置一致性。
+核心创新：通过 SupCon + 对抗去偏 + 课程学习，改变 RoBERTa 的表示空间，
+使其能够区分"讨论敏感话题"和"对敏感话题进行有毒攻击"。
 
 使用示例:
-    # 1. 训练+测试
-    python utils/blackbox_pipeline.py --mode all --dataset_name TOXICN --epochs 30 --patience 10 --use_dual_encoder --use_coded_terms --use_homophone --use_multitask
+    # 完整 TAD-CL 训练
+    python utils/blackbox_pipeline.py --mode all --dataset_name TOXICN --epochs 30 --patience 10 --use_supcon --use_adversary --use_curriculum
 
-    # 2. 仅测试模式 (必须指定实验时间戳)
+    # 仅 SupCon（无对抗去偏）
+    python utils/blackbox_pipeline.py --mode all --use_supcon --no_adversary
+
+    # 仅对抗去偏（无 SupCon）
+    python utils/blackbox_pipeline.py --mode all --no_supcon --use_adversary
+
+    # 禁用课程学习
+    python utils/blackbox_pipeline.py --mode all --no_curriculum
+
+    # 测试已训练模型
     python utils/blackbox_pipeline.py --mode test --timestamp 20260601-143000
-
-命令行参数说明:
-    运行模式:
-        --mode              运行模式: all (训练+测试, 默认), train (仅训练), test (仅测试)
-        --timestamp         测试模式时的实验时间戳 (如: 20260601-143000)
-
-    数据集配置:
-        --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
-
-    知识注入开关:
-        --use_dual_encoder  启用双路编码器 (默认: True)
-        --no_dual_encoder   禁用双路编码器
-        --use_coded_terms   启用编码术语注入 (默认: True)
-        --no_coded_terms    禁用编码术语注入
-        --use_homophone     启用谐音还原 (默认: True)
-        --no_homophone      禁用谐音还原
-        --use_multitask     启用多任务学习 (默认: True)
-        --no_multitask      禁用多任务学习
-        --use_platform      启用平台嵌入 (默认: True)
-        --no_platform       禁用平台嵌入
-
-    随机种子:
-        --seed              随机种子 (默认: 1)
-        --use_deterministic 启用确定性模式 (默认: False)
-
-    训练超参数:
-        --batch_size        批次大小 (默认: 16)
-        --epochs            训练轮数 (默认: 30)
-        --lr_backbone       骨干学习率 (默认: 2e-5)
-        --lr_head           分类头学习率 (默认: 1e-3)
-        --patience          早停耐心值 (默认: 10)
-        --max_len           最大序列长度 (默认: 128)
-
-    多任务权重:
-        --lambda_topic      topic损失权重 (默认: 0.3)
-        --lambda_expression expression损失权重 (默认: 0.3)
-
-输出文件:
-    实验目录结构 (experiments/<timestamp>/):
-        ├── config.json              # 实验配置快照
-        ├── best_model.pth           # 最佳模型权重
-        ├── metrics.png              # 训练曲线图
-        └── test_results/            # 测试结果目录 (仅 all/test 模式)
-            ├── metrics.json         # 测试集评估指标
-            ├── classification_report.txt  # 详细分类报告
-            └── predictions.json     # 逐条预测结果
 """
 
 import argparse
@@ -62,9 +25,11 @@ import json
 import sys
 from pathlib import Path
 from datetime import datetime
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from transformers import AutoTokenizer
@@ -79,7 +44,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from configs.kipc_config import KIPCConfig
-from models.blackbox_classifier import KnowledgeEnhancedClassifier
+from models.blackbox_classifier import TADCLClassifier
 from utils.knowledge_utils import (
     HomophoneRestorer, CodedTermMatcher,
     get_platform_id, get_topic_id,
@@ -90,10 +55,7 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="知识增强黑盒分类器训练流水线 (KIPC-CBM Phase 1)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description="TAD-CL 训练流水线")
 
     parser.add_argument('--mode', type=str, choices=['all', 'train', 'test'], default='all')
     parser.add_argument('--timestamp', type=str, default=None)
@@ -110,6 +72,13 @@ def parse_args():
     parser.add_argument('--use_platform', action='store_true', default=True)
     parser.add_argument('--no_platform', action='store_false', dest='use_platform')
 
+    parser.add_argument('--use_supcon', action='store_true', default=True)
+    parser.add_argument('--no_supcon', action='store_false', dest='use_supcon')
+    parser.add_argument('--use_adversary', action='store_true', default=True)
+    parser.add_argument('--no_adversary', action='store_false', dest='use_adversary')
+    parser.add_argument('--use_curriculum', action='store_true', default=True)
+    parser.add_argument('--no_curriculum', action='store_false', dest='use_curriculum')
+
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--use_deterministic', action='store_true', default=False)
 
@@ -117,11 +86,18 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=None)
     parser.add_argument('--lr_backbone', type=float, default=None)
     parser.add_argument('--lr_head', type=float, default=None)
+    parser.add_argument('--lr_adversary', type=float, default=None)
     parser.add_argument('--patience', type=int, default=None)
     parser.add_argument('--max_len', type=int, default=None)
 
     parser.add_argument('--lambda_topic', type=float, default=None)
     parser.add_argument('--lambda_expression', type=float, default=None)
+    parser.add_argument('--lambda_supcon', type=float, default=None)
+    parser.add_argument('--lambda_adv', type=float, default=None)
+    parser.add_argument('--supcon_temperature', type=float, default=None)
+    parser.add_argument('--projection_dim', type=int, default=None)
+    parser.add_argument('--adv_warmup_epochs', type=int, default=None)
+    parser.add_argument('--curriculum_strategy', type=str, choices=['linear', 'baby_step'], default=None)
 
     return parser.parse_args()
 
@@ -135,6 +111,9 @@ def update_config(args):
     config.use_homophone = args.use_homophone
     config.use_multitask = args.use_multitask
     config.use_platform = args.use_platform
+    config.use_supcon = args.use_supcon
+    config.use_adversary = args.use_adversary
+    config.use_curriculum = args.use_curriculum
 
     if args.seed is not None:
         config.seed = args.seed
@@ -148,6 +127,8 @@ def update_config(args):
         config.lr_backbone = args.lr_backbone
     if args.lr_head is not None:
         config.lr_head = args.lr_head
+    if args.lr_adversary is not None:
+        config.lr_adversary = args.lr_adversary
     if args.patience is not None:
         config.patience = args.patience
     if args.max_len is not None:
@@ -156,8 +137,56 @@ def update_config(args):
         config.lambda_topic = args.lambda_topic
     if args.lambda_expression is not None:
         config.lambda_expression = args.lambda_expression
+    if args.lambda_supcon is not None:
+        config.lambda_supcon = args.lambda_supcon
+    if args.lambda_adv is not None:
+        config.lambda_adv = args.lambda_adv
+    if args.supcon_temperature is not None:
+        config.supcon_temperature = args.supcon_temperature
+    if args.projection_dim is not None:
+        config.projection_dim = args.projection_dim
+    if args.adv_warmup_epochs is not None:
+        config.adv_warmup_epochs = args.adv_warmup_epochs
+    if args.curriculum_strategy is not None:
+        config.curriculum_strategy = args.curriculum_strategy
 
     return config
+
+
+class SupConLoss(nn.Module):
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, features, labels):
+        features = F.normalize(features, dim=1)
+        device = features.device
+        batch_size = features.shape[0]
+
+        similarity = torch.matmul(features, features.T) / self.temperature
+
+        label_mask = labels.unsqueeze(0) == labels.unsqueeze(1)
+        diag_mask = ~torch.eye(batch_size, dtype=torch.bool, device=device)
+        positive_mask = label_mask & diag_mask
+
+        num_positives = positive_mask.sum(dim=1)
+        has_positives = num_positives > 0
+
+        if not has_positives.any():
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        exp_sim = torch.exp(similarity) * diag_mask.float()
+        log_sum_exp = torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+        log_prob = similarity - log_sum_exp
+
+        mean_log_prob_pos = torch.zeros(batch_size, device=device)
+        for i in range(batch_size):
+            if num_positives[i] > 0:
+                mean_log_prob_pos[i] = log_prob[i][positive_mask[i]].mean()
+
+        loss = -mean_log_prob_pos[has_positives].mean()
+        return loss
 
 
 class ToxicDataset(Dataset):
@@ -183,9 +212,8 @@ class ToxicDataset(Dataset):
         content = item["content"]
         toxic = item["toxic"]
         platform = item.get("platform", "zhihu")
-        topic_str = item.get("topic", "none")
+        topic_str = item.get("topic", "race")
         expression = item.get("expression", 0)
-        target = item.get("target", [0, 0, 0, 0, 0])
 
         orig_enc = self._tokenize(content)
 
@@ -207,7 +235,6 @@ class ToxicDataset(Dataset):
             "toxic_label": torch.tensor(toxic, dtype=torch.long),
             "topic_label": torch.tensor(get_topic_id(topic_str), dtype=torch.long),
             "expression_label": torch.tensor(expression, dtype=torch.long),
-            "target_label": torch.tensor(target, dtype=torch.float),
         }
 
         if rest_enc is not None:
@@ -241,7 +268,64 @@ def load_data(config):
     return train_data, test_data
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, config):
+def build_curriculum_indices(train_data, config):
+    if not config.use_curriculum:
+        return None
+
+    easy_idx = []
+    medium_idx = []
+    hard_idx = []
+    hardest_idx = []
+
+    for i, item in enumerate(train_data):
+        toxic = item.get("toxic", 0)
+        expr = item.get("expression", 0)
+        topic = item.get("topic", "")
+
+        if toxic == 1 and expr == 1:
+            easy_idx.append(i)
+        elif toxic == 1 and expr in [2, 3]:
+            medium_idx.append(i)
+        elif toxic == 1 and expr == 0:
+            hard_idx.append(i)
+        elif toxic == 0 and topic in ["race", "gender", "region", "lgbt"]:
+            hardest_idx.append(i)
+        else:
+            easy_idx.append(i)
+
+    return {
+        "easy": easy_idx,
+        "medium": medium_idx,
+        "hard": hard_idx,
+        "hardest": hardest_idx,
+    }
+
+
+def get_curriculum_subset(train_data, curriculum_indices, epoch, total_epochs, strategy="linear"):
+    if curriculum_indices is None:
+        return train_data
+
+    if strategy == "linear":
+        progress = epoch / max(total_epochs, 1)
+        if progress < 0.25:
+            indices = curriculum_indices["easy"] + curriculum_indices["hardest"]
+        elif progress < 0.5:
+            indices = (curriculum_indices["easy"] + curriculum_indices["medium"]
+                       + curriculum_indices["hardest"])
+        elif progress < 0.75:
+            indices = (curriculum_indices["easy"] + curriculum_indices["medium"]
+                       + curriculum_indices["hard"] + curriculum_indices["hardest"])
+        else:
+            return train_data
+
+        if not indices:
+            return train_data
+        return [train_data[i] for i in indices]
+
+    return train_data
+
+
+def train_epoch(model, dataloader, optimizer, scheduler, device, config, epoch):
     model.train()
     total_loss = 0
     all_preds = []
@@ -250,8 +334,12 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, config):
     criterion_toxic = nn.CrossEntropyLoss()
     criterion_topic = nn.CrossEntropyLoss()
     criterion_expr = nn.CrossEntropyLoss()
+    supcon_loss_fn = SupConLoss(temperature=config.supcon_temperature) if config.use_supcon else None
 
-    pbar = tqdm(dataloader, desc="Training")
+    is_adv_warmup = config.use_adversary and epoch < config.adv_warmup_epochs
+    current_lambda_adv = 0.0 if is_adv_warmup else config.lambda_adv
+
+    pbar = tqdm(dataloader, desc=f"Training (epoch {epoch + 1})")
     for batch in pbar:
         input_ids_orig = batch["input_ids_orig"].to(device)
         attention_mask_orig = batch["attention_mask_orig"].to(device)
@@ -260,6 +348,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, config):
         kwargs = {
             "input_ids_orig": input_ids_orig,
             "attention_mask_orig": attention_mask_orig,
+            "lambda_adv": current_lambda_adv,
         }
 
         if config.use_dual_encoder:
@@ -282,6 +371,15 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, config):
             loss = loss + config.lambda_topic * criterion_topic(outputs["topic_logits"], topic_label)
             loss = loss + config.lambda_expression * criterion_expr(outputs["expression_logits"], expr_label)
 
+        if config.use_supcon and supcon_loss_fn is not None:
+            supcon_loss = supcon_loss_fn(outputs["projected"], toxic_label)
+            loss = loss + config.lambda_supcon * supcon_loss
+
+        if config.use_adversary and not is_adv_warmup:
+            topic_label = batch["topic_label"].to(device)
+            adv_loss = criterion_topic(outputs["adv_topic_logits"], topic_label)
+            loss = loss + current_lambda_adv * adv_loss
+
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -293,7 +391,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, config):
         all_preds.extend(preds)
         all_labels.extend(toxic_label.cpu().numpy())
 
-        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "λ_adv": f"{current_lambda_adv:.2f}"})
 
     avg_loss = total_loss / len(dataloader)
     f1 = f1_score(all_labels, all_preds, average='macro')
@@ -308,8 +406,6 @@ def evaluate_epoch(model, dataloader, device, config):
     all_labels = []
 
     criterion_toxic = nn.CrossEntropyLoss()
-    criterion_topic = nn.CrossEntropyLoss()
-    criterion_expr = nn.CrossEntropyLoss()
 
     for batch in tqdm(dataloader, desc="Evaluating"):
         input_ids_orig = batch["input_ids_orig"].to(device)
@@ -319,6 +415,7 @@ def evaluate_epoch(model, dataloader, device, config):
         kwargs = {
             "input_ids_orig": input_ids_orig,
             "attention_mask_orig": attention_mask_orig,
+            "lambda_adv": 0.0,
         }
 
         if config.use_dual_encoder:
@@ -332,14 +429,7 @@ def evaluate_epoch(model, dataloader, device, config):
             kwargs["platform_ids"] = batch["platform_ids"].to(device)
 
         outputs = model(**kwargs)
-
         loss = criterion_toxic(outputs["toxic_logits"], toxic_label)
-
-        if config.use_multitask:
-            topic_label = batch["topic_label"].to(device)
-            expr_label = batch["expression_label"].to(device)
-            loss = loss + config.lambda_topic * criterion_topic(outputs["topic_logits"], topic_label)
-            loss = loss + config.lambda_expression * criterion_expr(outputs["expression_logits"], expr_label)
 
         total_loss += loss.item()
         preds = torch.argmax(outputs["toxic_logits"], dim=1).cpu().numpy()
@@ -361,7 +451,7 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
     ax1.plot(epochs, test_losses, color='tab:orange', linestyle='--', label='Test Loss')
     ax1.set_ylabel('Loss')
     ax1.legend(loc='upper right')
-    ax1.set_title('Blackbox Training Metrics')
+    ax1.set_title('TAD-CL Training Metrics')
     ax1.grid(True, linestyle='--', alpha=0.6)
 
     ax2.plot(epochs, val_f1_scores, color='tab:blue', label='Val F1')
@@ -380,15 +470,22 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
     plt.close()
 
 
-def train(config, train_dataset, val_dataset, test_dataset):
+def train(config, train_data, val_data, test_data):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> 正在使用设备: {device}")
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(config.roberta_path))
+    homo_restorer = HomophoneRestorer(str(config.homo_dict_path))
+    coded_matcher = CodedTermMatcher(str(config.coded_terms_path), max_terms=config.num_coded_terms)
+
+    val_dataset = ToxicDataset(val_data, tokenizer, config, homo_restorer, coded_matcher, config.max_len)
+    test_dataset = ToxicDataset(test_data, tokenizer, config, homo_restorer, coded_matcher, config.max_len)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
-    model = KnowledgeEnhancedClassifier(
+    curriculum_indices = build_curriculum_indices(train_data, config)
+
+    model = TADCLClassifier(
         roberta_path=config.roberta_path,
         num_coded_terms=config.num_coded_terms if config.use_coded_terms else 1,
         num_platforms=2 if config.use_platform else 1,
@@ -401,26 +498,33 @@ def train(config, train_dataset, val_dataset, test_dataset):
         use_platform=config.use_platform,
         num_topics=config.num_topics,
         num_expressions=config.num_expressions,
+        use_supcon=config.use_supcon,
+        projection_dim=config.projection_dim,
+        use_adversary=config.use_adversary,
     ).to(device)
 
     backbone_params = []
     head_params = []
+    adversary_params = []
     for name, param in model.named_parameters():
         if "roberta" in name:
             backbone_params.append(param)
+        elif "topic_adversary" in name:
+            adversary_params.append(param)
         else:
             head_params.append(param)
 
     optimizer = AdamW([
         {"params": backbone_params, "lr": config.lr_backbone},
         {"params": head_params, "lr": config.lr_head},
+        {"params": adversary_params, "lr": config.lr_adversary},
     ])
 
-    total_steps = len(train_loader) * config.epochs
+    total_steps = len(train_data) // config.batch_size * config.epochs
     from torch.optim.lr_scheduler import OneCycleLR
     scheduler = OneCycleLR(
         optimizer,
-        max_lr=[config.lr_backbone, config.lr_head],
+        max_lr=[config.lr_backbone, config.lr_head, config.lr_adversary],
         total_steps=total_steps,
         pct_start=0.1,
         anneal_strategy='cos',
@@ -443,7 +547,13 @@ def train(config, train_dataset, val_dataset, test_dataset):
     test_loss_history = []
 
     for epoch in range(config.epochs):
-        train_loss, train_f1 = train_epoch(model, train_loader, optimizer, scheduler, device, config)
+        curriculum_data = get_curriculum_subset(
+            train_data, curriculum_indices, epoch, config.epochs, config.curriculum_strategy
+        )
+        train_dataset = ToxicDataset(curriculum_data, tokenizer, config, homo_restorer, coded_matcher, config.max_len)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+
+        train_loss, train_f1 = train_epoch(model, train_loader, optimizer, scheduler, device, config, epoch)
 
         val_loss, val_f1, val_p, val_r = evaluate_epoch(model, val_loader, device, config)
         test_loss, test_f1, _, _ = evaluate_epoch(model, test_loader, device, config)
@@ -456,10 +566,30 @@ def train(config, train_dataset, val_dataset, test_dataset):
         test_f1_history.append(test_f1)
         test_loss_history.append(test_loss)
 
+        curriculum_phase = ""
+        if config.use_curriculum:
+            progress = epoch / max(config.epochs, 1)
+            if progress < 0.25:
+                curriculum_phase = " [Phase 1: Easy]"
+            elif progress < 0.5:
+                curriculum_phase = " [Phase 2: +Medium]"
+            elif progress < 0.75:
+                curriculum_phase = " [Phase 3: +Hard]"
+            else:
+                curriculum_phase = " [Phase 4: All]"
+
+        adv_status = ""
+        if config.use_adversary:
+            if epoch < config.adv_warmup_epochs:
+                adv_status = f" [Adv: Warmup {epoch + 1}/{config.adv_warmup_epochs}]"
+            else:
+                adv_status = f" [Adv: Active λ={config.lambda_adv}]"
+
         print(f"Epoch {epoch + 1}: "
               f"Train Loss={train_loss:.4f}, Train F1={train_f1:.4f} | "
               f"Val Loss={val_loss:.4f}, Val F1={val_f1:.4f}, Val P={val_p:.4f}, Val R={val_r:.4f} | "
-              f"Test Loss={test_loss:.4f}, Test F1={test_f1:.4f}")
+              f"Test Loss={test_loss:.4f}, Test F1={test_f1:.4f}"
+              f"{curriculum_phase}{adv_status}")
 
         if val_f1 > best_f1:
             improvement = val_f1 - best_f1
@@ -493,10 +623,6 @@ def evaluate(config, timestamp):
     with open(experiment_dir / "config.json", "r", encoding="utf-8") as f:
         saved_config = SimpleNamespace(**json.load(f))
 
-    if saved_config.use_deterministic:
-        from utils.seed import set_reproducibility
-        set_reproducibility(saved_config)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     tokenizer = AutoTokenizer.from_pretrained(str(saved_config.roberta_path))
@@ -513,7 +639,7 @@ def evaluate(config, timestamp):
     test_dataset = ToxicDataset(test_data, tokenizer, saved_config, homo_restorer, coded_matcher, saved_config.max_len)
     test_loader = DataLoader(test_dataset, batch_size=saved_config.batch_size, shuffle=False)
 
-    model = KnowledgeEnhancedClassifier(
+    model = TADCLClassifier(
         roberta_path=Path(saved_config.roberta_path),
         num_coded_terms=saved_config.num_coded_terms if saved_config.use_coded_terms else 1,
         num_platforms=2 if saved_config.use_platform else 1,
@@ -526,6 +652,9 @@ def evaluate(config, timestamp):
         use_platform=saved_config.use_platform,
         num_topics=saved_config.num_topics,
         num_expressions=saved_config.num_expressions,
+        use_supcon=getattr(saved_config, 'use_supcon', False),
+        projection_dim=getattr(saved_config, 'projection_dim', 128),
+        use_adversary=getattr(saved_config, 'use_adversary', False),
     )
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
@@ -536,7 +665,7 @@ def evaluate(config, timestamp):
             input_ids_orig = batch["input_ids_orig"].to(device)
             attention_mask_orig = batch["attention_mask_orig"].to(device)
 
-            kwargs = {"input_ids_orig": input_ids_orig, "attention_mask_orig": attention_mask_orig}
+            kwargs = {"input_ids_orig": input_ids_orig, "attention_mask_orig": attention_mask_orig, "lambda_adv": 0.0}
             if saved_config.use_dual_encoder:
                 kwargs["input_ids_rest"] = batch["input_ids_rest"].to(device)
                 kwargs["attention_mask_rest"] = batch["attention_mask_rest"].to(device)
@@ -556,7 +685,7 @@ def evaluate(config, timestamp):
     report = classification_report(all_labels, all_preds, target_names=["Non-Toxic", "Toxic"])
 
     print("\n" + "=" * 30)
-    print("      黑盒分类器 测试集评估结果")
+    print("      TAD-CL 测试集评估结果")
     print("=" * 30)
     print(f"精确率 (Precision - Macro): {precision:.4f}")
     print(f"召回率 (Recall - Macro):    {recall:.4f}")
@@ -576,7 +705,7 @@ def evaluate(config, timestamp):
         }, f, indent=2, ensure_ascii=False)
 
     with open(test_results_dir / "classification_report.txt", "w", encoding="utf-8") as f:
-        f.write("黑盒分类器 测试集评估结果\n")
+        f.write("TAD-CL 测试集评估结果\n")
         f.write("=" * 30 + "\n")
         f.write(f"精确率 (Precision - Macro): {precision:.4f}\n")
         f.write(f"召回率 (Recall - Macro):    {recall:.4f}\n")
@@ -610,7 +739,6 @@ def main():
 
         if not config.roberta_path.exists():
             print(f"错误: RoBERTa 模型路径不存在: {config.roberta_path}")
-            print("请先下载 chinese-roberta-wwm-ext 到 models/ 目录")
             sys.exit(1)
 
         if not config.homo_dict_path.exists():
@@ -629,7 +757,6 @@ def main():
         config.experiment_path = experiment_dir
 
         tokenizer = AutoTokenizer.from_pretrained(str(config.roberta_path))
-
         homo_restorer = HomophoneRestorer(str(config.homo_dict_path))
         coded_matcher = CodedTermMatcher(str(config.coded_terms_path), max_terms=config.num_coded_terms)
         config.num_coded_terms = coded_matcher.num_terms
@@ -647,7 +774,7 @@ def main():
             print(">>> 已禁用确定性模式, 结果将不可复现")
 
         print(f"\n{'=' * 60}")
-        print("知识增强黑盒分类器 - 配置信息")
+        print("TAD-CL (Topic-Adversarial Debiasing + Contrastive Learning)")
         print("=" * 60)
         print(f"数据集: {config.dataset_name}")
         print(f"双路编码器: {config.use_dual_encoder}")
@@ -655,8 +782,10 @@ def main():
         print(f"谐音还原: {config.use_homophone} (映射数: {len(homo_restorer.homo_map)})")
         print(f"多任务学习: {config.use_multitask}")
         print(f"平台嵌入: {config.use_platform}")
-        print(f"学习率: backbone={config.lr_backbone}, head={config.lr_head}")
-        print(f"多任务权重: lambda_topic={config.lambda_topic}, lambda_expression={config.lambda_expression}")
+        print(f"SupCon: {config.use_supcon} (λ={config.lambda_supcon}, τ={config.supcon_temperature})")
+        print(f"对抗去偏: {config.use_adversary} (λ={config.lambda_adv}, warmup={config.adv_warmup_epochs})")
+        print(f"课程学习: {config.use_curriculum} (策略={config.curriculum_strategy})")
+        print(f"学习率: backbone={config.lr_backbone}, head={config.lr_head}, adv={config.lr_adversary}")
         print("=" * 60 + "\n")
 
         train_data, test_data = load_data(config)
@@ -667,13 +796,9 @@ def main():
             random_state=config.seed,
         )
 
-        train_dataset = ToxicDataset(train_data_split, tokenizer, config, homo_restorer, coded_matcher, config.max_len)
-        val_dataset = ToxicDataset(val_data_split, tokenizer, config, homo_restorer, coded_matcher, config.max_len)
-        test_dataset = ToxicDataset(test_data, tokenizer, config, homo_restorer, coded_matcher, config.max_len)
+        print(f">>> 训练集: {len(train_data_split)}, 验证集: {len(val_data_split)}, 测试集: {len(test_data)}")
 
-        print(f">>> 训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
-
-        metrics = train(config, train_dataset, val_dataset, test_dataset)
+        metrics = train(config, train_data_split, val_data_split, test_data)
         plot_metrics(config, *metrics)
 
         if args.mode == 'all':
