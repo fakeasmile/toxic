@@ -190,9 +190,9 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         dtype="auto",
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
-        max_model_len=2048,
+        max_model_len=1024,
         max_num_seqs=256,
-        max_num_batched_tokens=4096,
+        max_num_batched_tokens=2048,
     )
     if effective_quantization is not None:
         llm_kwargs["quantization"] = effective_quantization
