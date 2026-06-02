@@ -26,9 +26,18 @@ python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN
 
 import argparse
 import math
+import os
 import sys
 from pathlib import Path
 import json
+
+# 修复AutoDL等环境中OMP_NUM_THREADS设置无效导致vLLM初始化失败的问题
+# 错误现象：libgomp: Invalid value for environment variable OMP_NUM_THREADS
+#           RuntimeError: set_num_threads expects a positive integer
+if "OMP_NUM_THREADS" in os.environ:
+    val = os.environ["OMP_NUM_THREADS"].strip()
+    if not val.isdigit() or int(val) <= 0:
+        os.environ.pop("OMP_NUM_THREADS")
 
 import pandas as pd
 import torch
