@@ -19,9 +19,9 @@
 使用示例：
 # Qwen2.5-7B-Instruct-AWQ（AWQ 4-bit预量化权重，量化方式自动检测，无需指定--quantization）
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ
-# Qwen3.5-9B（多模态模型，仅使用文本推理；当前无官方预量化版本，必须指定--quantization进行在线量化以节省显存；
+# Qwen3.5-9B（多模态模型，仅使用文本推理；使用FP8动态量化将显存从~18GB降至~9GB；
 #   自动：1)禁用thinking 2)跳过视觉编码器节省显存）
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen3.5-9B --quantization awq
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen3.5-9B --quantization fp8
 """
 
 import argparse
@@ -92,8 +92,8 @@ def parse_args():
         default=None,
         choices=[None, 'awq', 'fp8', 'gptq'],
         help='量化方法：awq/fp8/gptq，None表示不使用量化（默认）。'
-             '预量化权重（如Qwen2.5-7B-Instruct-AWQ）无需指定，自动从config.json检测；'
-             '全量权重（如Qwen3.5-9B）必须手动指定--quantization进行在线量化以节省显存。'
+             'awq/gptq：仅适用于预量化权重（如Qwen2.5-7B-Instruct-AWQ），自动从config.json检测，无需手动指定；'
+             'fp8：适用于全量权重（如Qwen3.5-9B）的动态量化，无需校准数据，显存减半。'
     )
 
     parser.add_argument(
@@ -140,12 +140,13 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     
     自动适配不同模型系列：
     - Qwen2.5-7B-Instruct-AWQ：纯文本模型，AWQ 4-bit预量化权重，量化方式自动检测
-    - Qwen3.5-9B：多模态模型（仅使用文本推理），当前无官方预量化版本，必须通过--quantization
-      指定在线量化方式（如awq）以节省显存；纯文本推理时跳过视觉编码器
+    - Qwen3.5-9B：多模态模型（仅使用文本推理），当前无官方预量化版本，
+      通过--quantization fp8进行FP8动态量化（无需校准数据，显存从~18GB降至~9GB）；
+      纯文本推理时跳过视觉编码器以节省显存
     
     关键差异处理：
-    1. 量化检测：预量化权重自动从config.json读取quantization_config，无需手动指定；
-       全量权重（如Qwen3.5-9B）需用户通过--quantization手动指定在线量化方式
+    1. 量化检测：预量化权重（AWQ/GPTQ）自动从config.json读取quantization_config，无需手动指定；
+       全量权重（如Qwen3.5-9B）通过--quantization fp8进行FP8动态量化
     2. 多模态模型：Qwen3.5系列设置limit_mm_per_prompt跳过视觉编码器
     3. 数据类型：Qwen3.5-9B原版权重为bfloat16，在不支持bf16的GPU(如3080Ti)上需使用float16
     """
@@ -171,17 +172,21 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         tokenizer.pad_token = tokenizer.eos_token
 
     # 构建vLLM加载参数
+    # 注意：quantization=None 与不传quantization参数的行为不同，
+    # 显式传入None可能被vLLM理解为"不使用量化"，导致预量化权重被当作FP16加载而OOM。
+    # 因此只在effective_quantization有值时才传入quantization参数，否则让vLLM自动检测。
     llm_kwargs = dict(
         model=str(llm_path),
         trust_remote_code=True,
         dtype="auto",
-        quantization=effective_quantization,
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
         max_num_seqs=256,
         max_num_batched_tokens=4096,
     )
+    if effective_quantization is not None:
+        llm_kwargs["quantization"] = effective_quantization
 
     # Qwen3.5系列是原生多模态模型，纯文本推理时需跳过视觉编码器以节省显存
     # 参考：https://www.modelscope.cn/models/Qwen/Qwen3.5-9B

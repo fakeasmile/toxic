@@ -50,7 +50,7 @@ ADJECTIVE = "包容的"
 
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
-QUANTIZATION = None  # 量化方法：None/awq/fp8/gptq。预量化权重(7B-AWQ)无需指定自动检测；全量权重(9B)必须指定如awq
+QUANTIZATION = None  # 量化方法：None/awq/fp8/gptq。预量化权重(7B-AWQ)自动检测；全量权重(9B)使用--quantization fp8动态量化
 TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
 # ===================================================================
 
@@ -81,7 +81,7 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     自动适配不同模型系列：
     - Qwen2.5-7B-Instruct-AWQ：纯文本模型，AWQ 4-bit预量化权重，量化方式自动检测
     - Qwen3.5-9B：多模态模型（仅使用文本推理），当前无官方预量化版本，
-      必须通过quantization参数指定在线量化方式（如awq）以节省显存；纯文本推理时跳过视觉编码器
+      通过--quantization fp8进行FP8动态量化（显存从~18GB降至~9GB）；纯文本推理时跳过视觉编码器
     """
     llm_path = model_path / model_name
     if not llm_path.exists():
@@ -105,17 +105,21 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         tokenizer.pad_token = tokenizer.eos_token
 
     # 构建vLLM加载参数
+    # 注意：quantization=None 与不传quantization参数的行为不同，
+    # 显式传入None可能被vLLM理解为"不使用量化"，导致预量化权重被当作FP16加载而OOM。
+    # 因此只在effective_quantization有值时才传入quantization参数，否则让vLLM自动检测。
     llm_kwargs = dict(
         model=str(llm_path),
         trust_remote_code=True,
         dtype="auto",
-        quantization=effective_quantization,
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=2048,
         max_num_seqs=256,
         max_num_batched_tokens=4096,
     )
+    if effective_quantization is not None:
+        llm_kwargs["quantization"] = effective_quantization
 
     # Qwen3.5系列是原生多模态模型，纯文本推理时需跳过视觉编码器以节省显存
     if is_multimodal_model(model_name):
