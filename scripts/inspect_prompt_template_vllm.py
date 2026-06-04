@@ -42,7 +42,7 @@ from configs.MLP_config import MLPConfig
 
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-7B-Instruct-AWQ"  # models目录下的模型文件夹名（可选：Qwen2.5-7B-Instruct-AWQ / Qwen3.5-9B）
+MODEL_NAME = "Qwen2.5-7B-Instruct-AWQ"  # models目录下的模型文件夹名
 
 # 文本内容和形容词（直接修改即可）
 TEXT_CONTENT = "什么被害妄想猎巫man"
@@ -50,50 +50,53 @@ ADJECTIVE = "包容的"
 
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
-QUANTIZATION = None  # 量化方法：None/awq/fp8/gptq。预量化权重(7B-AWQ)自动检测；全量权重(9B)使用--quantization fp8动态量化
 TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
 # ===================================================================
 
 
-def is_multimodal_model(model_name: str) -> bool:
-    """检测是否为多模态模型（如Qwen3.5-9B，含Vision Encoder）
-    
-    Qwen3.5系列是原生多模态模型，纯文本推理时需设置limit_mm_per_prompt跳过视觉编码器以节省显存。
-    """
-    return model_name.startswith("Qwen3.5")
+# 模型加载配置表（与 generate_adjective_c_r_vllm.py 保持一致）
+MODEL_LOADING_CONFIG = {
+    "Qwen2.5-7B-Instruct-AWQ": {
+        "quantization": "awq",
+        "is_qwen3": False,
+        "is_multimodal": False,
+    },
+    "Qwen3.5-9B": {
+        "quantization": None,
+        "is_qwen3": True,
+        "is_multimodal": True,
+    },
+    "glm-4-9b-chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+    },
+}
 
 
-def detect_quantization_from_config(llm_path: Path) -> str | None:
-    """从模型config.json中自动检测量化配置"""
-    import json as _json
-    config_path = llm_path / "config.json"
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            model_config = _json.load(f)
-        if "quantization_config" in model_config:
-            return model_config["quantization_config"].get("quant_method", None)
-    return None
+def get_model_loading_config(model_name: str) -> dict:
+    """从 MODEL_LOADING_CONFIG 中获取模型加载配置。未知模型将直接报错。"""
+    if model_name not in MODEL_LOADING_CONFIG:
+        raise ValueError(
+            f"不支持的模型: {model_name}。"
+            f"请在 MODEL_LOADING_CONFIG 中添加该模型的配置条目后重试。"
+        )
+    return MODEL_LOADING_CONFIG[model_name].copy()
 
 
-def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85, quantization: str = None):
+def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85):
     """加载vLLM模型和tokenizer（复用generate_adjective_c_r_vllm逻辑）
-    
-    自动适配不同模型系列：
-    - Qwen2.5-7B-Instruct-AWQ：纯文本模型，AWQ 4-bit预量化权重，量化方式自动检测
-    - Qwen3.5-9B：多模态模型（仅使用文本推理），当前无官方预量化版本，
-      通过--quantization fp8进行FP8动态量化（显存从~18GB降至~9GB）；纯文本推理时跳过视觉编码器
+
+    所有模型差异（量化方式、多模态处理、Qwen3+ 标志）均从
+    MODEL_LOADING_CONFIG 中读取，保证新增模型时只需改配置表。
     """
     llm_path = model_path / model_name
     if not llm_path.exists():
         raise ValueError(f"LLM path {llm_path} does not exist")
 
-    # 量化方式检测：优先使用用户指定的量化方式，否则自动从config.json检测
-    effective_quantization = quantization
-    if effective_quantization is None:
-        auto_detected = detect_quantization_from_config(llm_path)
-        if auto_detected:
-            effective_quantization = auto_detected
-            print(f"检测到模型自带量化配置: {auto_detected}")
+    model_config = get_model_loading_config(model_name)
+    quantization = model_config["quantization"]
+    is_multimodal = model_config["is_multimodal"]
 
     print(f"Loading tokenizer from {llm_path}")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -104,10 +107,6 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # 构建vLLM加载参数
-    # 注意：quantization=None 与不传quantization参数的行为不同，
-    # 显式传入None可能被vLLM理解为"不使用量化"，导致预量化权重被当作FP16加载而OOM。
-    # 因此只在effective_quantization有值时才传入quantization参数，否则让vLLM自动检测。
     llm_kwargs = dict(
         model=str(llm_path),
         trust_remote_code=True,
@@ -118,14 +117,10 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         max_num_seqs=256,
         max_num_batched_tokens=4096,
     )
-    if effective_quantization is not None:
-        llm_kwargs["quantization"] = effective_quantization
+    if quantization is not None:
+        llm_kwargs["quantization"] = quantization
 
-    # Qwen3.5系列是原生多模态模型，纯文本推理时需跳过视觉编码器以节省显存
-    # 同时优化显存占用以适配16GB显卡：
-    # enforce_eager=True跳过CUDA Graph，max_num_seqs/max_model_len降低KV Cache
-    # 保留enable_prefix_caching以复用前缀KV Cache
-    if is_multimodal_model(model_name):
+    if is_multimodal:
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         llm_kwargs["enforce_eager"] = True
         llm_kwargs["max_num_seqs"] = 64
@@ -133,14 +128,10 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         print(f"检测到多模态模型({model_name})，已启用纯文本推理优化（跳过视觉编码器+CUDA Graph+降低显存占用，保留前缀缓存）")
 
     print(f"Loading vLLM model from {llm_path}")
-    print(f"  量化方式: {effective_quantization if effective_quantization else '无量化'}")
+    print(f"  量化方式: {quantization if quantization else '无量化'}")
     llm = LLM(**llm_kwargs)
 
-    return tokenizer, llm
-
-
-def is_qwen3_plus(model_name: str) -> bool:
-    return model_name.startswith("Qwen3")
+    return tokenizer, llm, model_config["is_qwen3"]
 
 
 def get_first_token_ids(word_list, tokenizer):
@@ -187,7 +178,7 @@ def build_chat_messages(text_content, adjective):
 def main():
     config = MLPConfig()
 
-    tokenizer, llm_model = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION, QUANTIZATION)
+    tokenizer, llm_model, qwen3_flag = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION)
 
     # 构建Chat Template messages
     messages, verbalizer_words, score_tokens = build_chat_messages(
@@ -195,7 +186,6 @@ def main():
     )
 
     # 生成完整prompt文本
-    qwen3_flag = is_qwen3_plus(MODEL_NAME)
     chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
     prompt = tokenizer.apply_chat_template(
         messages,
@@ -210,7 +200,6 @@ def main():
     print(f"模型: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"形容词: {ADJECTIVE}")
-    print(f"量化方法: {QUANTIZATION if QUANTIZATION else '无量化'}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
     print(f"采样温度: {TEMPERATURE}")
     print(f"提示词: {prompt}")
