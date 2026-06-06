@@ -5,7 +5,7 @@
 
 使用示例:
     # 1. 训练+测试
-    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ --epochs 500 --patience 20
+    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-GPTQ-Int8 --epochs 500 --patience 20
     
     # 2. 仅测试模式 (必须指定实验时间戳)
     python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433

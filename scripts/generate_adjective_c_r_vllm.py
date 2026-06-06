@@ -17,8 +17,8 @@
 - inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率，即LLM的首token是否将概率质量分配给verbalizer token词表
 
 使用示例：
-# Qwen2.5-7B-Instruct-AWQ（AWQ 4-bit预量化权重，量化方式自动检测，无需指定--quantization）
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-AWQ
+# Qwen2.5-7B-Instruct-GPTQ-Int8（GPTQ Int8预量化权重，量化方式自动检测，无需指定--quantization）
+python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-GPTQ-Int8
 # Qwen3.5-9B（多模态模型，仅使用文本推理；全量加载不量化；
 #   自动：1)禁用thinking 2)跳过视觉编码器节省显存）
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen3.5-9B
@@ -121,8 +121,8 @@ def parse_args():
 # 若新模型存在目前配置表无法覆盖的特殊加载需求，再视情况扩展 load_vllm_model。
 # =============================================================================
 MODEL_LOADING_CONFIG = {
-    "Qwen2.5-7B-Instruct-AWQ": {
-        "quantization": "awq",
+    "Qwen2.5-7B-Instruct-GPTQ-Int8": {
+        "quantization": "gptq",
         "is_qwen3": False,
         "is_multimodal": False,
     },
