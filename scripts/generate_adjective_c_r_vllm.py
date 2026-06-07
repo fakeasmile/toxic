@@ -86,6 +86,13 @@ def parse_args():
     )
 
     parser.add_argument(
+        '--adjective_path',
+        type=str,
+        default=None,
+        help='自定义形容词词典路径（CSV），不指定则使用MLP_config中的默认路径'
+    )
+
+    parser.add_argument(
         '--gpu_memory_utilization',
         type=float,
         default=0.85,
@@ -242,8 +249,14 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                    "5 = 非常相关\n"
                    "直接回答数字。")
 
-    # 加载形容词词典
-    adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
+    # 加载形容词词典（兼容两种CSV格式：chinese列或name列）
+    adj_df = pd.read_csv(adjective_path)
+    if "chinese" in adj_df.columns:
+        adjectives = adj_df["chinese"].tolist()
+    elif "name" in adj_df.columns:
+        adjectives = adj_df["name"].tolist()
+    else:
+        raise ValueError(f"形容词词典 {adjective_path} 缺少 'chinese' 或 'name' 列")
 
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
@@ -381,10 +394,17 @@ def main():
     print(f"CSV输出路径: {csv_output_path}")
     print("=" * 60 + "\n")
 
+    # 形容词词典路径：命令行指定 > 默认配置
+    adjective_path = config.adjective_path
+    if args.adjective_path is not None:
+        adjective_path = Path(args.adjective_path)
+        if not adjective_path.exists():
+            raise ValueError(f"自定义形容词词典路径不存在: {adjective_path}")
+
     tokenizer, llm_model, qwen3_flag = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization)
     if qwen3_flag:
         print(f"检测到Qwen3+模型({args.model_name})，已禁用思考模式(enable_thinking=False)")
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
+    generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
 
     print("生成完成")
 
