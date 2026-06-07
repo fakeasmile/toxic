@@ -97,7 +97,7 @@ def parse_args():
     # 数据集配置
     parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称')
     parser.add_argument('--model_name', type=str, default='Qwen2.5-7B-Instruct-GPTQ-Int8',
-                        help='LLM模型名称（用于定位概念向量路径）')
+                        help='概念向量目录名（对应data/processed/{dataset_name}/{model_name}/）')
     parser.add_argument('--adjective_path', type=str, default=None,
                         help='自定义形容词词典路径（CSV），不指定则使用默认路径')
 

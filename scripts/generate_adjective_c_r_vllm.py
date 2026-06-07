@@ -106,6 +106,13 @@ def parse_args():
         help='采样温度（默认2.0），用于控制概率分布的分散程度'
     )
 
+    parser.add_argument(
+        '--output_model_name',
+        type=str,
+        default=None,
+        help='概念向量输出的模型目录名（不指定则使用--model_name）。用于区分不同词典生成的概念向量'
+    )
+
     return parser.parse_args()
 
 
@@ -375,7 +382,7 @@ def main():
 
     # 动态生成依赖 dataset_name/model_name 的路径
     data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"  # 原始数据集目录
-    concept_dir = config.processed_path / args.dataset_name / args.model_name  # 概念向量输出目录
+    concept_dir = config.processed_path / args.dataset_name / (args.output_model_name or args.model_name)  # 概念向量输出目录
     concept_dir.mkdir(parents=True, exist_ok=True)
     output_path = concept_dir / f"concept_{args.mode}.json"
     csv_output_path = concept_dir / f"concept_{args.mode}.csv"
