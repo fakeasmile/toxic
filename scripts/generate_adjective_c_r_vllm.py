@@ -79,13 +79,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        '--template',
-        type=str,
-        default='likert',
-        help='提示词模板类型（已废弃，保留仅兼容旧实验）'
-    )
-
-    parser.add_argument(
         '--gpu_memory_utilization',
         type=float,
         default=0.85,
@@ -372,7 +365,6 @@ def main():
     print("=" * 60)
     print(f"数据集名称: {args.dataset_name}")
     print(f"LLM模型名称: {args.model_name}")
-    print(f"提示词模板: {args.template}（已废弃）")
     print(f"当前模式: {args.mode}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"采样温度: {args.temperature}")

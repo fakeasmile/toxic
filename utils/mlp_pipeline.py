@@ -17,8 +17,7 @@
     
     数据集配置:
         --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
-        --model_name        LLM模型名称 (默认: Qwen2.5-1.5B-Instruct)
-        --template          提示词模板类型 (已废弃，保留参数仅兼容旧实验)
+        --model_name        LLM模型名称 (默认: Qwen2.5-7B-Instruct-GPTQ-Int8)
     
     随机种子:
         --seed              随机种子 (默认: 1)
@@ -111,8 +110,7 @@ def parse_args():
 
     # 数据集配置
     parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
-    parser.add_argument('--model_name', type=str, default='Qwen2.5-1.5B-Instruct', help='LLM模型名称')
-    parser.add_argument('--template', type=str, default='likert',help='提示词模板类型（已废弃，保留仅兼容旧实验）')
+    parser.add_argument('--model_name', type=str, default='Qwen2.5-7B-Instruct-GPTQ-Int8', help='LLM模型名称')
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')
@@ -142,12 +140,11 @@ def update_MLPConfig(args):
     """
     mlp_config = MLPConfig()  # MLP_config.py中的配置对象
 
-    # 数据集与模板配置
+    # 数据集配置
     mlp_config.dataset_name = args.dataset_name
     mlp_config.model_name = args.model_name
-    mlp_config.template = args.template
 
-    # 动态生成依赖 dataset_name/model_name/template 的路径
+    # 动态生成依赖 dataset_name/model_name 的路径
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                      / mlp_config.model_name / "concept_train.json")
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
@@ -534,7 +531,6 @@ def main():
             "experiment_path": str(config.experiment_path),
             "dataset_name": config.dataset_name,
             "model_name": config.model_name,
-            "template": config.template,
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
             "processed_path": str(config.processed_path),
