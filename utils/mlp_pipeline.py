@@ -33,7 +33,7 @@
         --anneal_strategy   衰减策略: cos (余弦) 或 linear (线性), 默认: cos
     
     MLP模型结构参数:
-        --dropout_rate      Dropout比率 (默认: 0.3)
+        --dropout_rate      Dropout比率 (默认: 0.5)
         --hidden_features   隐藏层维度 (默认: 96)
         --patience          早停耐心值 (默认: 20)
 
