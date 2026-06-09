@@ -8,6 +8,8 @@ class MLPConfig():
         self.raw_data_path = self.base_path / "data" / "raw"  # 原始数据根目录
         self.processed_path = self.base_path / "data" / "processed"  # 数据处理保存路径
         self.adjective_path = self.raw_data_path / "adjective" / "toxic_adjectives_new.csv"  # 形容词词典路径
+        self.reasoning_pattern_path = self.raw_data_path / "adjective" / "reasoning_patterns.csv"  # 推理模式词典路径
+        self.concept_type = "adjective"  # 概念类型: "adjective" 或 "reasoning"
         self.models_path = self.base_path / "models"  # LLM模型路径
         self.experiment_path = self.base_path / "experiments"  # 实验结果保存目录
 

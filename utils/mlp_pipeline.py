@@ -113,6 +113,8 @@ def parse_args():
     parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
     parser.add_argument('--model_name', type=str, default='Qwen2.5-1.5B-Instruct', help='LLM模型名称')
     parser.add_argument('--template', type=str, default='likert',help='提示词模板类型（已废弃，保留仅兼容旧实验）')
+    parser.add_argument('--concept_type', type=str, default='adjective', choices=['adjective', 'reasoning'],
+                        help='概念类型: adjective(形容词概念) 或 reasoning(推理模式概念)')
 
     # 随机种子
     parser.add_argument('--seed', type=int, default=None, help='随机种子')
@@ -146,12 +148,17 @@ def update_MLPConfig(args):
     mlp_config.dataset_name = args.dataset_name
     mlp_config.model_name = args.model_name
     mlp_config.template = args.template
+    mlp_config.concept_type = args.concept_type
 
-    # 动态生成依赖 dataset_name/model_name/template 的路径
-    mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                     / mlp_config.model_name / "concept_train.json")
-    mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                    / mlp_config.model_name / "concept_test.json")
+    # 动态生成概念向量路径（根据concept_type决定子目录）
+    if mlp_config.concept_type == "reasoning":
+        # 推理模式概念向量存储在 reasoning_patterns 子目录下
+        concept_subdir = mlp_config.processed_path / mlp_config.dataset_name / mlp_config.model_name / "reasoning_patterns"
+    else:
+        concept_subdir = mlp_config.processed_path / mlp_config.dataset_name / mlp_config.model_name
+
+    mlp_config.train_concept_path = concept_subdir / "concept_train.json"
+    mlp_config.test_concept_path = concept_subdir / "concept_test.json"
 
     # 随机种子
     if args.seed is not None:
@@ -535,6 +542,7 @@ def main():
             "dataset_name": config.dataset_name,
             "model_name": config.model_name,
             "template": config.template,
+            "concept_type": config.concept_type,
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
             "processed_path": str(config.processed_path),
