@@ -24,7 +24,7 @@ class ICBConfig:
 
         # ========== 数据集配置 ==========
         self.dataset_name = "TOXICN"
-        self.model_name = "Qwen2.5-7B-Instruct-GPTQ-Int8"
+        self.model_name = "Qwen2.5-7B-Instruct"
 
         # ========== ICB-CBM模型参数 ==========
         self.dense_dim = 64          # 每个概念的稠密向量维度 d

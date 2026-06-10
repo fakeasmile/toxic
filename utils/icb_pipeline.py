@@ -7,7 +7,7 @@ Information-Compressed Bottleneck Concept Bottleneck Model
 
 使用示例:
     # 1. 训练+测试
-    python utils/icb_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-GPTQ-Int8
+    python utils/icb_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct
 
     # 2. 仅测试模式 (必须指定实验时间戳)
     python utils/icb_pipeline.py --mode test --timestamp 20260609-120000
@@ -19,7 +19,7 @@ Information-Compressed Bottleneck Concept Bottleneck Model
 
     数据集配置:
         --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
-        --model_name        LLM模型名称 (默认: Qwen2.5-7B-Instruct-GPTQ-Int8)
+        --model_name        LLM模型名称 (默认: Qwen2.5-7B-Instruct)
 
     随机种子:
         --seed              随机种子 (默认: 1)
@@ -99,7 +99,7 @@ def parse_args():
 
     # 数据集配置
     parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称')
-    parser.add_argument('--model_name', type=str, default='Qwen2.5-7B-Instruct-GPTQ-Int8',
+    parser.add_argument('--model_name', type=str, default='Qwen2.5-7B-Instruct',
                         help='LLM模型名称')
 
     # 随机种子

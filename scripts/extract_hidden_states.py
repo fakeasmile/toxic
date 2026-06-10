@@ -17,8 +17,8 @@
 4. 保存为.pt文件
 
 使用示例：
-# Qwen2.5-7B-Instruct-GPTQ-Int8
-python scripts/extract_hidden_states.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct-GPTQ-Int8 --layer 16
+# Qwen2.5-7B-Instruct
+python scripts/extract_hidden_states.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct --layer 16
 
 # Qwen3.5-9B
 python scripts/extract_hidden_states.py --mode train --dataset_name TOXICN --model_name Qwen3.5-9B --layer 20
@@ -49,6 +49,11 @@ from configs.MLP_config import MLPConfig
 # 模型加载配置表（与generate_adjective_c_r_vllm.py保持一致）
 # =============================================================================
 MODEL_LOADING_CONFIG = {
+    "Qwen2.5-7B-Instruct": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+    },
     "Qwen2.5-7B-Instruct-GPTQ-Int8": {
         "quantization": "gptq",
         "is_qwen3": False,
