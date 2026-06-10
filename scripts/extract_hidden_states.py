@@ -117,13 +117,12 @@ def load_transformers_model(model_path: Path, model_name: str):
 
     model_kwargs = {
         "trust_remote_code": True,
-        "torch_dtype": torch.float16,
+        "dtype": torch.float16,
         "device_map": "auto",
     }
 
-    if quantization == "gptq":
-        from transformers import GPTQConfig
-        model_kwargs["quantization_config"] = GPTQConfig(bits=8)
+    # GPTQ预量化权重自带quantization_config，无需手动指定
+    # 手动传GPTQConfig会导致与模型自带配置冲突
 
     model = AutoModelForCausalLM.from_pretrained(llm_path, **model_kwargs)
     model.eval()
