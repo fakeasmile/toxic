@@ -121,8 +121,16 @@ def load_transformers_model(model_path: Path, model_name: str):
         "device_map": "auto",
     }
 
-    # GPTQ预量化权重自带quantization_config，无需手动指定
-    # 手动传GPTQConfig会导致与模型自带配置冲突
+    if quantization == "gptq":
+        # 使用auto-gptq后端加载GPTQ量化模型，绕过optimum的QuantizeConfig bug
+        # 需要安装: pip install auto-gptq
+        try:
+            import auto_gptq  # noqa: F401 - 注册auto-gptq后端
+        except ImportError:
+            raise ImportError(
+                "加载GPTQ模型需要auto-gptq，请运行: pip install auto-gptq"
+            )
+        # 不手动传quantization_config，让transformers自动从模型权重读取配置
 
     model = AutoModelForCausalLM.from_pretrained(llm_path, **model_kwargs)
     model.eval()
