@@ -122,9 +122,8 @@ def load_transformers_model(model_path: Path, model_name: str):
     }
 
     if quantization == "gptq":
-        # 预量化权重，让transformers自动检测量化配置，不手动指定bits
         from transformers import GPTQConfig
-        model_kwargs["quantization_config"] = GPTQConfig()
+        model_kwargs["quantization_config"] = GPTQConfig(bits=8)
 
     model = AutoModelForCausalLM.from_pretrained(llm_path, **model_kwargs)
     model.eval()
