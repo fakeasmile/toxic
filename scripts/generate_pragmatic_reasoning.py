@@ -109,16 +109,21 @@ DIMENSION_NAMES = list(DIMENSION_CONFIG.keys())
 
 
 def build_reasoning_prompt(content: str) -> list:
-    """构建语用推理的Chat Template消息（精简版）
+    """构建语用推理的Chat Template消息（紧凑版）
 
-    不在提示词中列出所有候选概念，而是给出维度描述让LLM自由选择。
-    LLM本身具备足够的语言理解能力，无需枚举候选列表。
-    这样可将提示词从~800 tokens压缩到~200 tokens。
+    必须列出候选概念，否则LLM会自由发挥生成不在词表中的概念。
+    使用紧凑格式减少token数：每行一个维度，概念用/分隔。
     """
+    # 构建紧凑的维度-概念列表
+    dim_lines = []
+    for dim_key, dim_cfg in DIMENSION_CONFIG.items():
+        concepts_str = "/".join(dim_cfg["concepts"])
+        dim_lines.append(f"{dim_cfg['label']}({dim_key}): {concepts_str}")
+    dim_desc = "\n".join(dim_lines)
+
     system_msg = (
-        "分析文本的语用特征，从7个维度各选1个最匹配的形容词并简述理由。\n"
-        "维度：1表达策略 2隐含意图 3编码策略 4攻击目标 5情感基调 6语用效果 7话题区分\n"
-        "编码策略指谐音/暗语/缩写/反串等隐晦表达手段；话题区分指区分攻击与讨论敏感话题。\n"
+        "分析文本语用特征，从7个维度各选1个最匹配的形容词并简述理由。必须从候选中选择。\n"
+        f"{dim_desc}\n"
         "严格按JSON输出：\n"
         '{"expression_strategy":{"concept":"形容词","reason":"理由"},'
         '"implicit_intent":{"concept":"形容词","reason":"理由"},'
@@ -172,8 +177,15 @@ def parse_reasoning_output(text: str) -> dict:
             valid_concepts = DIMENSION_CONFIG[dim]["concepts"]
             if concept not in valid_concepts:
                 matched = False
+                # 尝试：候选包含输出 / 输出包含候选 / 去掉"的"后匹配
+                concept_stripped = concept.rstrip("的")
                 for vc in valid_concepts:
+                    vc_stripped = vc.rstrip("的")
                     if vc in concept or concept in vc:
+                        concept = vc
+                        matched = True
+                        break
+                    if concept_stripped == vc_stripped:
                         concept = vc
                         matched = True
                         break
