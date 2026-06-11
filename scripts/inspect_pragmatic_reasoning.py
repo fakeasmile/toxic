@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+import os
 
 if "OMP_NUM_THREADS" in os.environ:
     val = os.environ["OMP_NUM_THREADS"].strip()
