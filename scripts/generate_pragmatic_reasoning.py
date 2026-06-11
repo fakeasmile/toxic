@@ -43,6 +43,17 @@ from scripts.generate_adjective_c_r_vllm import (
 # =============================================================================
 # 维度定义与候选概念（用于解析校验，不再全部写入提示词）
 # =============================================================================
+# 维度定义：帮助LLM区分维度含义
+DIMENSION_DEFINITIONS = {
+    "expression_strategy": "关注'怎么说的'，即语言表达方式（攻击/侮辱/嘲讽/贬低等）",
+    "implicit_intent": "关注'暗含什么'，即表面之下的真实意图（反讽/阴阳怪气/暗示歧视等）",
+    "encoding_strategy": "关注'用了什么隐晦手段'，即谐音/暗语/缩写/反串等编码方式",
+    "attack_target": "关注'说谁的'，即攻击或歧视的对象群体（地域/性别/种族等）",
+    "emotional_tone": "关注'什么情绪'，即文本传递的情感色彩（仇恨/恶意/偏见等）",
+    "pragmatic_effect": "关注'产生什么效果'，即言论的社会影响（引战/挑拨/误导等）",
+    "topic_distinction": "关注'是否敏感话题讨论'，即区分攻击性言论与对敏感话题的讨论/批评/幽默",
+}
+
 DIMENSION_CONFIG = {
     "expression_strategy": {
         "label": "表达策略",
@@ -109,20 +120,21 @@ DIMENSION_NAMES = list(DIMENSION_CONFIG.keys())
 
 
 def build_reasoning_prompt(content: str) -> list:
-    """构建语用推理的Chat Template消息（紧凑版）
+    """构建语用推理的Chat Template消息（紧凑版+维度定义）
 
     必须列出候选概念，否则LLM会自由发挥生成不在词表中的概念。
-    使用紧凑格式减少token数：每行一个维度，概念用/分隔。
+    加入维度定义帮助LLM区分"怎么说的"和"说谁的"等易混淆维度。
     """
-    # 构建紧凑的维度-概念列表
+    # 构建紧凑的维度-概念列表（含定义）
     dim_lines = []
     for dim_key, dim_cfg in DIMENSION_CONFIG.items():
         concepts_str = "/".join(dim_cfg["concepts"])
-        dim_lines.append(f"{dim_cfg['label']}({dim_key}): {concepts_str}")
+        definition = DIMENSION_DEFINITIONS[dim_key]
+        dim_lines.append(f"{dim_cfg['label']}({dim_key}): {definition}。候选: {concepts_str}")
     dim_desc = "\n".join(dim_lines)
 
     system_msg = (
-        "分析文本语用特征，从7个维度各选1个最匹配的形容词并简述理由。必须从候选中选择。\n"
+        "分析文本语用特征，从7个维度各选1个最匹配的形容词并简述理由。必须从该维度的候选中选择，不要跨维度选。\n"
         f"{dim_desc}\n"
         "严格按JSON输出：\n"
         '{"expression_strategy":{"concept":"形容词","reason":"理由"},'
@@ -167,17 +179,24 @@ def parse_reasoning_output(text: str) -> dict:
     except json.JSONDecodeError:
         return default
 
+    # 构建全维度概念查找表（用于跨维度匹配）
+    all_concepts_map = {}  # concept -> dim_key
+    for dk, dcfg in DIMENSION_CONFIG.items():
+        for vc in dcfg["concepts"]:
+            all_concepts_map[vc] = dk
+            all_concepts_map[vc.rstrip("的")] = dk
+
     # 验证并填充缺失维度
     result = {}
     for dim in DIMENSION_NAMES:
         if dim in parsed and isinstance(parsed[dim], dict):
             concept = parsed[dim].get("concept", "解析失败")
             reason = parsed[dim].get("reason", "解析失败")
-            # 校验concept是否在候选列表中（模糊匹配）
+            # 校验concept是否在当前维度候选列表中
             valid_concepts = DIMENSION_CONFIG[dim]["concepts"]
             if concept not in valid_concepts:
                 matched = False
-                # 尝试：候选包含输出 / 输出包含候选 / 去掉"的"后匹配
+                # 1. 当前维度内模糊匹配
                 concept_stripped = concept.rstrip("的")
                 for vc in valid_concepts:
                     vc_stripped = vc.rstrip("的")
@@ -189,6 +208,12 @@ def parse_reasoning_output(text: str) -> dict:
                         concept = vc
                         matched = True
                         break
+                # 2. 跨维度搜索：如果概念属于其他维度，仍标记为解析失败
+                #    （因为维度归属错误），但不丢弃reason
+                if not matched and concept in all_concepts_map:
+                    # 概念存在但维度错误，标记失败但保留信息
+                    concept = "解析失败"
+                    matched = True  # 避免继续处理
                 if not matched:
                     concept = "解析失败"
             result[dim] = {"concept": concept, "reason": reason}
