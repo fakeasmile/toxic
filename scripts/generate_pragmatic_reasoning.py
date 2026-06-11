@@ -19,7 +19,6 @@ python scripts/generate_pragmatic_reasoning.py --mode train --dataset_name TOXIC
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -28,7 +27,6 @@ if "OMP_NUM_THREADS" in os.environ:
     if not val.isdigit() or int(val) <= 0:
         os.environ.pop("OMP_NUM_THREADS")
 
-import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -38,14 +36,12 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from configs.PCCG_config import PCCGConfig
-
-# 复用 generate_adjective_c_r_vllm.py 的模型加载配置
 from scripts.generate_adjective_c_r_vllm import (
     MODEL_LOADING_CONFIG, get_model_loading_config, load_vllm_model
 )
 
 # =============================================================================
-# 维度定义与候选概念
+# 维度定义与候选概念（用于解析校验，不再全部写入提示词）
 # =============================================================================
 DIMENSION_CONFIG = {
     "expression_strategy": {
@@ -112,34 +108,28 @@ DIMENSION_CONFIG = {
 DIMENSION_NAMES = list(DIMENSION_CONFIG.keys())
 
 
-def build_dimension_descriptions():
-    """构建维度描述文本，用于提示词"""
-    lines = []
-    for dim_key, dim_cfg in DIMENSION_CONFIG.items():
-        concepts_str = "/".join(dim_cfg["concepts"])
-        lines.append(f"{dim_cfg['label']}（{dim_key}）：{concepts_str}")
-    return "\n".join(lines)
-
-
 def build_reasoning_prompt(content: str) -> list:
-    """构建语用推理的Chat Template消息"""
-    dimension_desc = build_dimension_descriptions()
+    """构建语用推理的Chat Template消息（精简版）
 
+    不在提示词中列出所有候选概念，而是给出维度描述让LLM自由选择。
+    LLM本身具备足够的语言理解能力，无需枚举候选列表。
+    这样可将提示词从~800 tokens压缩到~200 tokens。
+    """
     system_msg = (
-        "你是一位语用分析专家。请对以下文本进行结构化语用分析。\n"
-        "从7个维度分别选择最相关的概念，并给出简要理由。\n\n"
-        f"维度与候选概念：\n{dimension_desc}\n\n"
-        "请严格按以下JSON格式输出，不要输出其他内容：\n"
-        '{"expression_strategy":{"concept":"...","reason":"..."},'
-        '"implicit_intent":{"concept":"...","reason":"..."},'
-        '"encoding_strategy":{"concept":"...","reason":"..."},'
-        '"attack_target":{"concept":"...","reason":"..."},'
-        '"emotional_tone":{"concept":"...","reason":"..."},'
-        '"pragmatic_effect":{"concept":"...","reason":"..."},'
-        '"topic_distinction":{"concept":"...","reason":"..."}}'
+        "分析文本的语用特征，从7个维度各选1个最匹配的形容词并简述理由。\n"
+        "维度：1表达策略 2隐含意图 3编码策略 4攻击目标 5情感基调 6语用效果 7话题区分\n"
+        "编码策略指谐音/暗语/缩写/反串等隐晦表达手段；话题区分指区分攻击与讨论敏感话题。\n"
+        "严格按JSON输出：\n"
+        '{"expression_strategy":{"concept":"形容词","reason":"理由"},'
+        '"implicit_intent":{"concept":"形容词","reason":"理由"},'
+        '"encoding_strategy":{"concept":"形容词","reason":"理由"},'
+        '"attack_target":{"concept":"形容词","reason":"理由"},'
+        '"emotional_tone":{"concept":"形容词","reason":"理由"},'
+        '"pragmatic_effect":{"concept":"形容词","reason":"理由"},'
+        '"topic_distinction":{"concept":"形容词","reason":"理由"}}'
     )
 
-    user_msg = f"文本内容：{content}"
+    user_msg = f"文本：{content}"
 
     return [
         {"role": "system", "content": system_msg},
@@ -159,7 +149,7 @@ def parse_reasoning_output(text: str) -> dict:
         for dim in DIMENSION_NAMES
     }
 
-    # 尝试提取JSON内容：找到第一个{到最后一个}之间的内容
+    # 提取JSON内容：找到第一个{到最后一个}之间的内容
     first_brace = text.find('{')
     last_brace = text.rfind('}')
     if first_brace == -1 or last_brace == -1 or first_brace >= last_brace:
@@ -178,10 +168,9 @@ def parse_reasoning_output(text: str) -> dict:
         if dim in parsed and isinstance(parsed[dim], dict):
             concept = parsed[dim].get("concept", "解析失败")
             reason = parsed[dim].get("reason", "解析失败")
-            # 校验concept是否在候选列表中
+            # 校验concept是否在候选列表中（模糊匹配）
             valid_concepts = DIMENSION_CONFIG[dim]["concepts"]
             if concept not in valid_concepts:
-                # 尝试模糊匹配
                 matched = False
                 for vc in valid_concepts:
                     if vc in concept or concept in vc:
@@ -198,7 +187,9 @@ def parse_reasoning_output(text: str) -> dict:
 
 
 def generate_reasoning(data_path, output_path, tokenizer, llm_model, is_qwen3=False):
-    """生成语用推理结果
+    """生成语用推理结果（批量推理）
+
+    一次性构建所有prompt，让vLLM自动调度批量推理。
 
     Args:
         data_path: 原始数据集路径
@@ -211,39 +202,44 @@ def generate_reasoning(data_path, output_path, tokenizer, llm_model, is_qwen3=Fa
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
 
-    # vLLM采样配置：生成较长文本以容纳JSON输出
+    # vLLM采样配置
     sampling_params = SamplingParams(
-        max_tokens=512,
+        max_tokens=256,
         temperature=0.3,
         top_p=0.9,
     )
 
-    results = []
-    parse_fail_count = 0
-
-    for sample in tqdm(data_set, desc="Generating reasoning"):
-        content = sample["content"]
-        messages = build_reasoning_prompt(content)
-
-        chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
+    # 一次性构建所有prompt
+    chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
+    prompts = []
+    for sample in data_set:
+        messages = build_reasoning_prompt(sample["content"])
         prompt_text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
             **chat_template_kwargs
         )
+        prompts.append(prompt_text)
 
-        # 单条推理
-        outputs = llm_model.generate([prompt_text], sampling_params, use_tqdm=False)
-        generated_text = outputs[0].outputs[0].text.strip()
+    print(f"共 {len(prompts)} 条prompt，开始批量推理...")
 
-        # 解析推理结果
+    # 批量推理（vLLM自动调度）
+    outputs = llm_model.generate(prompts, sampling_params)
+
+    # 解析结果
+    results = []
+    parse_fail_count = 0
+
+    for i, (sample, output) in enumerate(zip(data_set, outputs)):
+        generated_text = output.outputs[0].text.strip()
         reasoning = parse_reasoning_output(generated_text)
+
         if any(r["concept"] == "解析失败" for r in reasoning.values()):
             parse_fail_count += 1
 
         results.append({
-            "content": content,
+            "content": sample["content"],
             "toxic": sample["toxic"],
             "reasoning": reasoning,
         })
