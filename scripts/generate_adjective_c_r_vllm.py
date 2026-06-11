@@ -92,6 +92,13 @@ def parse_args():
         help='采样温度（默认2.0），用于控制概率分布的分散程度'
     )
 
+    parser.add_argument(
+        '--adjective_path',
+        type=str,
+        default=None,
+        help='形容词词典路径（默认使用MLPConfig中的adjective_path）'
+    )
+
     return parser.parse_args()
 
 
@@ -240,8 +247,14 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                    "5 = 非常相关\n"
                    "直接回答数字。")
 
-    # 加载形容词词典
-    adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
+    # 加载形容词词典（兼容两种列名：chinese 或 name）
+    adj_df = pd.read_csv(adjective_path)
+    if "chinese" in adj_df.columns:
+        adjectives = adj_df["chinese"].tolist()
+    elif "name" in adj_df.columns:
+        adjectives = adj_df["name"].tolist()
+    else:
+        raise ValueError(f"形容词词典 {adjective_path} 缺少 'chinese' 或 'name' 列")
 
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
@@ -378,10 +391,13 @@ def main():
     print(f"CSV输出路径: {csv_output_path}")
     print("=" * 60 + "\n")
 
+    # 形容词词典路径：命令行参数优先，否则使用MLPConfig默认值
+    adjective_path = Path(args.adjective_path) if args.adjective_path else config.adjective_path
+
     tokenizer, llm_model, qwen3_flag = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization)
     if qwen3_flag:
         print(f"检测到Qwen3+模型({args.model_name})，已禁用思考模式(enable_thinking=False)")
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
+    generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
 
     print("生成完成")
 
