@@ -135,7 +135,16 @@ def build_reasoning_prompt(content: str) -> list:
 
     system_msg = (
         "分析文本语用特征，从7个维度各选1个最匹配的形容词并简述理由。必须从该维度的候选中选择，不要跨维度选。\n"
-        f"{dim_desc}\n"
+        f"{dim_desc}\n\n"
+        "示例：\n"
+        "文本：就凭你的北京户口我就感觉你比我高级五个阶级，我是河北人😆\n"
+        '{"expression_strategy":{"concept":"嘲讽的","reason":"用反话讽刺北京人优越感"},'
+        '"implicit_intent":{"concept":"阴阳怪气的","reason":"表面恭维实则嘲讽地域差异"},'
+        '"encoding_strategy":{"concept":"无编码策略","reason":"直接表达未用隐晦手段"},'
+        '"attack_target":{"concept":"地域黑的","reason":"针对北京人和河北人的地域标签"},'
+        '"emotional_tone":{"concept":"恶意的","reason":"嘲讽中带有对地域的恶意"},'
+        '"pragmatic_effect":{"concept":"引战的","reason":"容易引发地域对立争论"},'
+        '"topic_distinction":{"concept":"讨论敏感话题的","reason":"涉及地域歧视敏感话题"}}\n\n'
         "严格按JSON输出：\n"
         '{"expression_strategy":{"concept":"形容词","reason":"理由"},'
         '"implicit_intent":{"concept":"形容词","reason":"理由"},'

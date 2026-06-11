@@ -108,7 +108,11 @@ def main():
             concept = dim_result.get("concept", "未知")
             reason = dim_result.get("reason", "未知")
             # 拼接概念和理由作为编码文本
-            encode_text = f"{concept}：{reason}"
+            # 当concept匹配失败时，reason仍携带关键语义信息，不丢弃
+            if concept == "解析失败" and reason != "解析失败":
+                encode_text = reason
+            else:
+                encode_text = f"{concept}：{reason}"
             texts.append(encode_text)
 
         print(f"编码维度: {dim_name} ({len(texts)} 条)")
