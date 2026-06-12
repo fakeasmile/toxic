@@ -77,7 +77,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from configs.MLP_config import MLPConfig
-from models.mlp import MLP
+from models.mlp import MLP, PCE_MLP
 
 # 配置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
@@ -129,6 +129,10 @@ def parse_args():
     parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
     parser.add_argument('--hidden_features', type=int, default=None, help='隐藏层维度')
     parser.add_argument('--patience', type=int, default=None, help='早停耐心值 (验证集F1连续patience个epoch未提升则停止)')
+
+    # PCE模型参数
+    parser.add_argument('--model_type', type=str, default=None, choices=['mlp', 'pce_mlp'], help='模型类型: mlp (原始标量) 或 pce_mlp (概率概念嵌入)')
+    parser.add_argument('--embed_dim', type=int, default=None, help='PCE概念嵌入维度')
 
     return parser.parse_args()
 
@@ -182,6 +186,12 @@ def update_MLPConfig(args):
     if args.patience is not None:
         mlp_config.patience = args.patience
 
+    # PCE模型参数
+    if args.model_type is not None:
+        mlp_config.model_type = args.model_type
+    if args.embed_dim is not None:
+        mlp_config.embed_dim = args.embed_dim
+
     return mlp_config
 
 
@@ -189,13 +199,16 @@ def load_data(config, mode):
     """加载指定训练或测试的概念向量和标签。
 
     概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
+    当 model_type 为 "pce_mlp" 时，额外加载 likert_probs 字段（V×5概率分布）。
 
     Args:
         config: 配置文件
         mode: train/test，区分加载训练或实验数据集
 
     Returns:
-        tuple: (concepts, labels) 概念向量和标签张量
+        tuple: (concepts, labels) 或 (likert_probs, labels)
+            - model_type="mlp": concepts (N, V), labels (N,)
+            - model_type="pce_mlp": likert_probs (N, V, 5), labels (N,)
     """
 
     if mode == "train":
@@ -209,12 +222,27 @@ def load_data(config, mode):
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
-    concepts, labels = [], []
-    for item in raw_concept_data:
-        concepts.append(item["concept"])
-        labels.append(item["toxic"])
+    model_type = getattr(config, 'model_type', 'mlp')
 
-    return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+    if model_type == "pce_mlp":
+        # PCE模式：加载Likert 5级概率分布
+        likert_probs, labels = [], []
+        for item in raw_concept_data:
+            if "likert_probs" not in item:
+                raise ValueError(
+                    f"概念向量文件中缺少 'likert_probs' 字段，"
+                    f"请使用PCE版本的脚本重新生成概念向量"
+                )
+            likert_probs.append(item["likert_probs"])  # V×5
+            labels.append(item["toxic"])
+        return torch.tensor(likert_probs, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+    else:
+        # 原始MLP模式：加载标量概念向量
+        concepts, labels = [], []
+        for item in raw_concept_data:
+            concepts.append(item["concept"])
+            labels.append(item["toxic"])
+        return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
 def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_recalls,
@@ -278,12 +306,27 @@ def train(config, train_dataset, val_dataset, test_dataset):
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
-    # 初始化模型
-    model = MLP(
-        in_features=train_dataset[0][0].shape[0],
-        dropout_rate=config.dropout_rate,
-        hidden_features=config.hidden_features
-    ).to(device)
+    # 初始化模型（根据model_type选择MLP或PCE_MLP）
+    model_type = getattr(config, 'model_type', 'mlp')
+    if model_type == "pce_mlp":
+        # PCE_MLP: 输入为 (batch, V, 5) 的Likert概率分布
+        num_concepts = train_dataset[0][0].shape[0]  # V
+        embed_dim = getattr(config, 'embed_dim', 16)
+        model = PCE_MLP(
+            num_concepts=num_concepts,
+            embed_dim=embed_dim,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features
+        ).to(device)
+        print(f">>> 使用PCE_MLP模型: num_concepts={num_concepts}, embed_dim={embed_dim}")
+    else:
+        # 原始MLP: 输入为 (batch, V) 的标量概念向量
+        model = MLP(
+            in_features=train_dataset[0][0].shape[0],
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features
+        ).to(device)
+        print(f">>> 使用MLP模型: in_features={train_dataset[0][0].shape[0]}")
 
     # 损失函数、优化器、学习率调度器
     criterion = nn.CrossEntropyLoss()
@@ -431,12 +474,25 @@ def evaluate(config, timestamp):
         raw_concept_data = json.load(f)
     contents = [item["content"] for item in raw_concept_data]
 
-    # 加载最佳模型
-    model = MLP(
-        in_features=test_x.shape[1],
-        dropout_rate=saved_config.dropout_rate,
-        hidden_features=saved_config.hidden_features
-    )
+    # 加载最佳模型（根据model_type选择MLP或PCE_MLP）
+    model_type = getattr(saved_config, 'model_type', 'mlp')
+    if model_type == "pce_mlp":
+        num_concepts = test_x.shape[1]  # V (test_x shape: N×V×5)
+        embed_dim = getattr(saved_config, 'embed_dim', 16)
+        model = PCE_MLP(
+            num_concepts=num_concepts,
+            embed_dim=embed_dim,
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features
+        )
+        print(f">>> 加载PCE_MLP模型: num_concepts={num_concepts}, embed_dim={embed_dim}")
+    else:
+        model = MLP(
+            in_features=test_x.shape[1],
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features
+        )
+        print(f">>> 加载MLP模型: in_features={test_x.shape[1]}")
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
 
@@ -545,7 +601,9 @@ def main():
             "anneal_strategy": config.anneal_strategy,
             "dropout_rate": config.dropout_rate,
             "hidden_features": config.hidden_features,
-            "patience": config.patience
+            "patience": config.patience,
+            "model_type": config.model_type,
+            "embed_dim": config.embed_dim,
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)

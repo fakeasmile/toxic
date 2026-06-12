@@ -335,8 +335,13 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 truncated_vector.append(0.0)
         concept_matrix.append(truncated_vector)
 
-        # 保存当前文本的推理结果（保留content、toxic和截断后的concept）
-        results.append({"content": content, "toxic": sample["toxic"], "concept": truncated_vector})
+        # 保存当前文本的推理结果（保留content、toxic、截断后的concept、Likert概率分布）
+        results.append({
+            "content": content,
+            "toxic": sample["toxic"],
+            "concept": truncated_vector,
+            "likert_probs": raw_probs  # V×5 Likert概率分布，用于PCE训练
+        })
 
     # 保存JSON文件（content + toxic）
     with open(output_path, "w", encoding="utf-8") as f:

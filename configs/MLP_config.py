@@ -31,6 +31,10 @@ class MLPConfig():
         self.hidden_features = 96  # 隐藏层特征维度
         self.patience = 20  # 早停耐心值 (验证集F1连续patience个epoch未提升则停止训练)
 
+        # ========== PCE 模型参数 ==========
+        self.model_type = "pce_mlp"  # 模型类型: "mlp" (原始标量) 或 "pce_mlp" (概率概念嵌入)
+        self.embed_dim = 16  # PCE概念嵌入维度
+
     def __repr__(self):
         """返回配置对象的字符串表示，包含所有配置项"""
         lines = [f"{self.__class__.__name__}:"]
