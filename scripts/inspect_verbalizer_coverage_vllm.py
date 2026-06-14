@@ -82,21 +82,25 @@ MODEL_LOADING_CONFIG = {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "",
     },
     "Qwen2.5-7B-Instruct-GPTQ-Int8": {
         "quantization": "gptq",
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "",
     },
     "Qwen3.5-9B": {
         "quantization": None,
         "is_qwen3": True,
         "is_multimodal": True,
+        "prompt_suffix": "",
     },
     "glm-4-9b-chat": {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "\n",
     },
 }
 
@@ -201,6 +205,7 @@ def analyze_verbalizer_coverage(
     output_dir: Path,
     model_name: str,
     is_qwen3=False,
+    prompt_suffix="",
     template="likert",
 ):
     """
@@ -248,6 +253,8 @@ def analyze_verbalizer_coverage(
             add_generation_prompt=True,
             **chat_template_kwargs
         )
+        # 追加模型特定的后缀
+        prompt_text += prompt_suffix
         prompts.append(prompt_text)
 
     # 批量推理（vLLM自动处理批量化）
@@ -378,6 +385,10 @@ def main():
     tokenizer, llm_model, qwen3_flag = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION)
     if qwen3_flag:
         print(f"检测到Qwen3+模型({MODEL_NAME})，已禁用思考模式(enable_thinking=False)")
+    model_config = get_model_loading_config(MODEL_NAME)
+    prompt_suffix = model_config.get("prompt_suffix", "")
+    if prompt_suffix:
+        print(f"检测到模型({MODEL_NAME})需要追加prompt后缀: {repr(prompt_suffix)}")
     analyze_verbalizer_coverage(
         text_content=TEXT_CONTENT,
         adjective_path=config.adjective_path,
@@ -386,6 +397,7 @@ def main():
         output_dir=output_dir,
         model_name=MODEL_NAME,
         is_qwen3=qwen3_flag,
+        prompt_suffix=prompt_suffix,
         template="likert",
     )
 

@@ -118,21 +118,25 @@ MODEL_LOADING_CONFIG = {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "",       # Qwen首token带空格，已在提示词末尾加空格处理
     },
     "Qwen2.5-7B-Instruct-GPTQ-Int8": {
         "quantization": "gptq",
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "",
     },
     "Qwen3.5-9B": {
         "quantization": None,
         "is_qwen3": True,
         "is_multimodal": True,
+        "prompt_suffix": "",
     },
     "glm-4-9b-chat": {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "\n",     # GLM-4首token为\n，追加\n使其直接输出数字
     },
 }
 
@@ -224,7 +228,7 @@ def build_chat_messages(instruction, content, adj, adj_definition=None):
     ]
     return messages
 
-def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, is_qwen3=False, threshold=1e-4):
+def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, is_qwen3=False, prompt_suffix="", threshold=1e-4):
     """生成形容词概念向量。
 
     此函数对底层 LLM 完全透明：无论加载的是 Qwen2.5、Qwen3.5 还是后续新增的
@@ -285,6 +289,8 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 add_generation_prompt=True,
                 **chat_template_kwargs
             )
+            # 追加模型特定的后缀（如GLM-4需要追加\n使其首token直接为数字）
+            prompt_text += prompt_suffix
             prompts.append(prompt_text)
 
         # 批量推理
@@ -384,7 +390,11 @@ def main():
     tokenizer, llm_model, qwen3_flag = load_vllm_model(config.models_path, args.model_name, args.gpu_memory_utilization)
     if qwen3_flag:
         print(f"检测到Qwen3+模型({args.model_name})，已禁用思考模式(enable_thinking=False)")
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, threshold=1e-4)
+    model_config = get_model_loading_config(args.model_name)
+    prompt_suffix = model_config.get("prompt_suffix", "")
+    if prompt_suffix:
+        print(f"检测到模型({args.model_name})需要追加prompt后缀: {repr(prompt_suffix)}")
+    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4)
 
     print("生成完成")
 

@@ -60,21 +60,25 @@ MODEL_LOADING_CONFIG = {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "",
     },
     "Qwen2.5-7B-Instruct-GPTQ-Int8": {
         "quantization": "gptq",
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "",
     },
     "Qwen3.5-9B": {
         "quantization": None,
         "is_qwen3": True,
         "is_multimodal": True,
+        "prompt_suffix": "",
     },
     "glm-4-9b-chat": {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
+        "prompt_suffix": "\n",
     },
 }
 
@@ -204,6 +208,10 @@ def main():
         add_generation_prompt=True,
         **chat_template_kwargs
     )
+    # 追加模型特定的后缀
+    model_config = get_model_loading_config(MODEL_NAME)
+    prompt_suffix = model_config.get("prompt_suffix", "")
+    prompt += prompt_suffix
 
     print("\n" + "=" * 60)
     print("模型推理调试（vLLM版本）")
