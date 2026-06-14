@@ -209,11 +209,14 @@ def get_first_token_ids(word_list, tokenizer):
 
     return list(dict.fromkeys(token_ids))
 
-def build_chat_messages(instruction, content, adj):
+def build_chat_messages(instruction, content, adj, adj_definition=None):
     """
     构建Likert Chat Template
     """
-    user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
+    if adj_definition:
+        user_content = f"文本内容：{content}\n形容词：{adj}\n定义：{adj_definition}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
+    else:
+        user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -244,8 +247,10 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                    "5 = 非常相关\n"
                    "直接回答数字。")
 
-    # 加载形容词词典
-    adjectives = pd.read_csv(adjective_path)["chinese"].tolist()
+    # 加载形容词词典（含定义）
+    adj_df = pd.read_csv(adjective_path)
+    adjectives = adj_df["chinese"].tolist()
+    adj_definitions = adj_df["definition"].tolist() if "definition" in adj_df.columns else [None] * len(adjectives)
 
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
@@ -269,8 +274,8 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
 
         # 在vllm中不手动分批次，构建一条文本+所有形容词的Chat Template
         prompts = []  # 关于当前文本的所有Chat Template
-        for adj in adjectives:
-            messages = build_chat_messages(instruction, content, adj)
+        for adj, adj_def in zip(adjectives, adj_definitions):
+            messages = build_chat_messages(instruction, content, adj, adj_def)
 
             # 添加<|im_start|>system,<|im_start|>user,<|im_start|>assistant特殊token
             chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}

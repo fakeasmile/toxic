@@ -176,12 +176,15 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-def build_chat_messages(instruction, content, adj):
+def build_chat_messages(instruction, content, adj, adj_definition=None):
     """
     构建Likert Chat Template的messages列表。
     与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
+    if adj_definition:
+        user_content = f"文本内容：{content}\n形容词：{adj}\n定义：{adj_definition}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
+    else:
+        user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -217,10 +220,11 @@ def analyze_verbalizer_coverage(
                    "5 = 非常相关\n"
                    "直接回答数字。")
 
-    # 加载形容词词典
+    # 加载形容词词典（含定义）
     adj_df = pd.read_csv(adjective_path)
     adjectives = adj_df["chinese"].tolist()
     adj_en_list = adj_df["adjective"].tolist() if "adjective" in adj_df.columns else [""] * len(adjectives)
+    adj_definitions = adj_df["definition"].tolist() if "definition" in adj_df.columns else [None] * len(adjectives)
 
     # vLLM采样配置
     sampling_params = SamplingParams(
@@ -234,8 +238,8 @@ def analyze_verbalizer_coverage(
 
     # 构建所有提示词
     prompts = []
-    for adj in adjectives:
-        messages = build_chat_messages(instruction, text_content, adj)
+    for adj, adj_def in zip(adjectives, adj_definitions):
+        messages = build_chat_messages(instruction, text_content, adj, adj_def)
 
         chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
         prompt_text = tokenizer.apply_chat_template(

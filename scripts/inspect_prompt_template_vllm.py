@@ -154,7 +154,7 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-def build_chat_messages(text_content, adjective):
+def build_chat_messages(text_content, adjective, adj_definition=None):
     """
     构建Likert Chat Template的messages列表。
     逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
@@ -169,7 +169,10 @@ def build_chat_messages(text_content, adjective):
                    "4 = 比较相关\n"
                    "5 = 非常相关\n"
                    "直接回答数字。")
-    user_content = f"文本内容：{text_content}\n形容词：{adjective}\n该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： "
+    if adj_definition:
+        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n定义：{adj_definition}\n该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： "
+    else:
+        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： "
     verbalizer_words = ["1", "2", "3", "4", "5"]
     score_tokens = {
         "likert": ["1", "2", "3", "4", "5"],
