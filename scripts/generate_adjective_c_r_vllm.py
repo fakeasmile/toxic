@@ -120,12 +120,6 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": False,
         "prompt_suffix": "",       # Qwen首token带空格，已在提示词末尾加空格处理
     },
-    "Qwen2.5-7B-Instruct-GPTQ-Int8": {
-        "quantization": "gptq",
-        "is_qwen3": False,
-        "is_multimodal": False,
-        "prompt_suffix": "",
-    },
     "Qwen3.5-9B": {
         "quantization": None,
         "is_qwen3": True,

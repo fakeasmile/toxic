@@ -93,7 +93,7 @@ def zero_shot_classify(data_path, output_dir, tokenizer, llm_model, is_qwen3=Fal
 
     # vLLM采样配置
     sampling_params = SamplingParams(
-        max_tokens=1,
+        max_tokens=3,
         temperature=0,
         logprobs=20
     )
@@ -124,6 +124,14 @@ def zero_shot_classify(data_path, output_dir, tokenizer, llm_model, is_qwen3=Fal
     for idx, (sample, output) in enumerate(zip(data_set, outputs)):
         logprobs = output.outputs[0].logprobs
         last_token_logprobs = logprobs[0]
+
+        # 提取LLM实际生成的前3个token
+        generated_tokens = []
+        for step, step_logprobs in enumerate(logprobs[:3]):
+            # 每步选择概率最高的token
+            if step_logprobs:
+                best_tid = max(step_logprobs.keys(), key=lambda tid: step_logprobs[tid].logprob)
+                generated_tokens.append(tokenizer.decode([best_tid]))
 
         # 将logprobs转为概率字典
         probs_dict = {}
@@ -157,6 +165,7 @@ def zero_shot_classify(data_path, output_dir, tokenizer, llm_model, is_qwen3=Fal
             "pred_label": pred_label,
             "pred_label_name": "Toxic" if pred_label == 1 else "Non-Toxic",
             "correct": pred_label == true_label,
+            "top3_tokens": generated_tokens,
             "p_yes": p_yes,
             "p_no": p_no,
             "p_yes_norm": p_yes_norm,

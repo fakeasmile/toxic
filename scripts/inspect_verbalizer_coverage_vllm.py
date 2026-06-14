@@ -60,7 +60,7 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-7B-Instruct"  # models目录下的模型文件夹名（可选：Qwen2.5-7B-Instruct / Qwen2.5-7B-Instruct-GPTQ-Int8 / Qwen3.5-9B）
+MODEL_NAME = "Qwen2.5-7B-Instruct"  # models目录下的模型文件夹名（可选：Qwen2.5-7B-Instruct / Qwen3.5-9B / glm-4-9b-chat）
 
 
 
@@ -80,12 +80,6 @@ TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的�
 MODEL_LOADING_CONFIG = {
     "Qwen2.5-7B-Instruct": {
         "quantization": None,
-        "is_qwen3": False,
-        "is_multimodal": False,
-        "prompt_suffix": "",
-    },
-    "Qwen2.5-7B-Instruct-GPTQ-Int8": {
-        "quantization": "gptq",
         "is_qwen3": False,
         "is_multimodal": False,
         "prompt_suffix": "",
