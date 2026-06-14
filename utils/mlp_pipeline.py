@@ -146,9 +146,9 @@ def update_MLPConfig(args):
 
     # 动态生成依赖 dataset_name/model_name 的路径
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                     / mlp_config.model_name / "concept_train.json")
+                                     / mlp_config.model_name / f"concept_train_{mlp_config.model_name}.json")
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                    / mlp_config.model_name / "concept_test.json")
+                                    / mlp_config.model_name / f"concept_test_{mlp_config.model_name}.json")
 
     # 随机种子
     if args.seed is not None:

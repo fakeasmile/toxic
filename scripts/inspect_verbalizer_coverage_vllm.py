@@ -148,11 +148,12 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         llm_kwargs["quantization"] = quantization
 
     if is_multimodal:
+        # 纯文本推理时跳过视觉编码器，释放显存给KV Cache
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
-        llm_kwargs["enforce_eager"] = True
+        llm_kwargs["language_model_only"] = True
         llm_kwargs["max_num_seqs"] = 64
         llm_kwargs["max_model_len"] = 1024
-        print(f"检测到多模态模型({model_name})，已启用纯文本推理优化（跳过视觉编码器+CUDA Graph+降低显存占用，保留前缀缓存）")
+        print(f"检测到多模态模型({model_name})，已启用纯文本推理优化（language_model_only + 跳过视觉编码器）")
 
     print(f"Loading vLLM model from {llm_path}")
     print(f"  量化方式: {quantization if quantization else '无量化'}")
@@ -180,7 +181,7 @@ def build_chat_messages(instruction, content, adj):
     构建Likert Chat Template的messages列表。
     与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
+    user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -205,7 +206,9 @@ def analyze_verbalizer_coverage(
     # 定义Likert verbalizer token 和提示词指令
     likert_tokens = ["1", "2", "3", "4", "5"]
     likert_ids = get_first_token_ids(likert_tokens, tokenizer)
-    instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+    instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
+                   "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
+                   "判断文本是否体现了该形容词所描述的特征。\n"
                    "评估等级：\n"
                    "1 = 完全不相关\n"
                    "2 = 不太相关\n"

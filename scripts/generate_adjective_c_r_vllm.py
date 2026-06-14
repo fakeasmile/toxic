@@ -177,15 +177,17 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         gpu_memory_utilization=gpu_memory_utilization,
         enable_prefix_caching=True,
         max_model_len=1024,
-        max_num_seqs=256,
-        max_num_batched_tokens=2048,
+        max_num_seqs=64,
+        max_num_batched_tokens=16384,
     )
     if quantization is not None:
         llm_kwargs["quantization"] = quantization
 
     if is_multimodal:
+        # 纯文本推理时跳过视觉编码器，释放显存给KV Cache
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
-        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt限制多模态输入")
+        llm_kwargs["language_model_only"] = True
+        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt + language_model_only")
 
     print(f"Loading vLLM model from {llm_path}")
     print(f"  量化方式: {quantization if quantization else '无量化'}")
@@ -211,7 +213,7 @@ def build_chat_messages(instruction, content, adj):
     """
     构建Likert Chat Template
     """
-    user_content = f"文本内容：{content}\n形容词：{adj}\n回答： "
+    user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -231,7 +233,9 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
     likert_tokens = ["1", "2", "3", "4", "5"]
     likert_ids = get_first_token_ids(likert_tokens, tokenizer)
 
-    instruction = ("你是一位语言分析专家。请评估以下文本与形容词的相关程度。\n"
+    instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
+                   "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
+                   "判断文本是否体现了该形容词所描述的特征。\n"
                    "评估等级：\n"
                    "1 = 完全不相关\n"
                    "2 = 不太相关\n"
@@ -335,8 +339,13 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 truncated_vector.append(0.0)
         concept_matrix.append(truncated_vector)
 
-        # 保存当前文本的推理结果（保留content、toxic和截断后的concept）
-        results.append({"content": content, "toxic": sample["toxic"], "concept": truncated_vector})
+        # 保存当前文本的推理结果（保留content、toxic、截断后的concept、Likert概率分布）
+        results.append({
+            "content": content,
+            "toxic": sample["toxic"],
+            "concept": truncated_vector,
+            "likert_probs": raw_probs  # V×5 Likert概率分布
+        })
 
     # 保存JSON文件（content + toxic）
     with open(output_path, "w", encoding="utf-8") as f:
@@ -362,8 +371,8 @@ def main():
     data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"  # 原始数据集目录
     concept_dir = config.processed_path / args.dataset_name / args.model_name  # 概念向量输出目录
     concept_dir.mkdir(parents=True, exist_ok=True)
-    output_path = concept_dir / f"concept_{args.mode}.json"
-    csv_output_path = concept_dir / f"concept_{args.mode}.csv"
+    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.json"
+    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.csv"
     # 打印配置信息
     print("\n" + "=" * 60)
     print("形容词概念向量生成(vLLM) - 配置信息")
