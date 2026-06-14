@@ -21,6 +21,7 @@ python scripts/llm_zero_shot_classify.py --dataset_name TOXICN --model_name glm-
 """
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -127,7 +128,7 @@ def zero_shot_classify(data_path, output_dir, tokenizer, llm_model, is_qwen3=Fal
         # 将logprobs转为概率字典
         probs_dict = {}
         for tid, logprob_obj in last_token_logprobs.items():
-            probs_dict[tid] = logprob_obj.probability
+            probs_dict[tid] = math.exp(logprob_obj.logprob)
 
         # 提取"是"和"否"的概率
         p_yes = sum(probs_dict.get(tid, 0.0) for tid in yes_ids)
