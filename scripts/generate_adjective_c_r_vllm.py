@@ -300,18 +300,7 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
                 logprob_obj = last_token_logprobs[token_id]
                 probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
-            # 手动应用temperature（vLLM的logprobs返回原始概率，不受temperature影响）
-            if temperature > 0:
-                # 反推logits（log(p) = logit - log(sum(exp(logits)))，在同一组内归一化常数相同）
-                logits = {tid: math.log(p + 1e-10) for tid, p in probs_dict.items()}
-                # 应用temperature
-                adjusted_logits = {tid: l / temperature for tid, l in logits.items()}
-                # 重新softmax
-                max_logit = max(adjusted_logits.values())
-                exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
-                probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
-
-            # 提取1-5等级的概率
+            # 提取1-5等级的概率（直接使用vLLM返回的原始概率，不手动应用temperature）
             level_probs = []
             for tid in likert_ids:
                 level_probs.append(probs_dict.get(tid, 0.0))

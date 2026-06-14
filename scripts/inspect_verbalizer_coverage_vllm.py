@@ -259,13 +259,7 @@ def analyze_verbalizer_coverage(
         for token_id, logprob_obj in first_token_logprobs.items():
             probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
-        # 手动应用temperature（vLLM的logprobs返回原始概率，不受temperature影响）
-        if TEMPERATURE > 0:
-            logits = {tid: math.log(p + 1e-10) for tid, p in probs_dict.items()}
-            adjusted_logits = {tid: l / TEMPERATURE for tid, l in logits.items()}
-            max_logit = max(adjusted_logits.values())
-            exp_sum = sum(math.exp(l - max_logit) for l in adjusted_logits.values())
-            probs_dict = {tid: math.exp(l - max_logit) / exp_sum for tid, l in adjusted_logits.items()}
+        # 直接使用vLLM返回的原始概率，不手动应用temperature
 
         level_probs = [probs_dict.get(tid, 0.0) for tid in likert_ids]
         total_prob = sum(level_probs)
