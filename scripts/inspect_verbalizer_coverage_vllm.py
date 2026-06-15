@@ -91,7 +91,7 @@ MODEL_LOADING_CONFIG = {
         "prompt_suffix": "",
     },
     "Qwen3.5-9B": {
-        "quantization": None,
+        "quantization": "fp8",
         "is_qwen3": True,
         "is_multimodal": True,
         "prompt_suffix": "",
@@ -103,6 +103,12 @@ MODEL_LOADING_CONFIG = {
         "prompt_suffix": "\n",
     },
     "deepseek-llm-7b-chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
+    "Baichuan2-7B-Chat": {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
