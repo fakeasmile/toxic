@@ -273,10 +273,8 @@ def analyze_verbalizer_coverage(
         max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
         # 计算加权期望likert分数（与generate_adjective_c_r_vllm.py一致）
         weights = [0.0, 0.25, 0.5, 0.75, 1.0]
-        if total_prob > 0:
-            likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob
-        else:
-            likert_score = 0.0
+        total_prob_eps = total_prob + 1e-8
+        likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob_eps
         results.append({
             "index": adj_idx,
             "adjective_en": adj_en_list[adj_idx],
