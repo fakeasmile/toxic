@@ -30,6 +30,7 @@ import math
 import sys
 from pathlib import Path
 
+import pandas as pd
 import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -189,9 +190,17 @@ def main():
 
     tokenizer, llm_model, qwen3_flag = load_vllm_model(config.models_path, MODEL_NAME, GPU_MEMORY_UTILIZATION)
 
+    # 从形容词词典CSV中查找定义
+    adj_df = pd.read_csv(config.adjective_path)
+    adj_definition = None
+    if "chinese" in adj_df.columns:
+        match = adj_df[adj_df["chinese"] == ADJECTIVE]
+        if not match.empty and "definition" in adj_df.columns:
+            adj_definition = match.iloc[0]["definition"]
+
     # 构建Chat Template messages
     messages, verbalizer_words, score_tokens = build_chat_messages(
-        TEXT_CONTENT, ADJECTIVE
+        TEXT_CONTENT, ADJECTIVE, adj_definition
     )
 
     # 生成完整prompt文本
@@ -213,6 +222,7 @@ def main():
     print(f"模型: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"形容词: {ADJECTIVE}")
+    print(f"形容词定义: {adj_definition}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
     print(f"采样温度: {TEMPERATURE}")
     print(f"提示词: {prompt}")
