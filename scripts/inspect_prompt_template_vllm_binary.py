@@ -1,30 +1,24 @@
-"""Qwen模型提示词模板调试工具（单样本切片分析，vLLM版本）
+"""Qwen模型提示词模板调试工具（单样本切片分析，vLLM版本）—— 二值"是否"版本
 
 【定位】
-本脚本是 generate_adjective_c_r_vllm.py 的"单样本切片"调试工具。
-generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
-而本脚本只抽取"一个文本 + 一个形容词"进行单步推理，用于在批量生成前快速验证
-提示词模板和 Verbalizer 词表的设计是否合理。
+本脚本是 inspect_prompt_template_vllm.py 的二值"是否"版本。
+与原版唯一区别在于提示词和verbalizer：原版使用Likert 1-5量表，
+本版使用"是/否"二值判断，分数计算为 P(是) / (P(是) + P(否))。
 
 【核心功能】
 1. 首 token 概率分布 Top-10
    观察模型在第一个输出位置的概率分布。如果 Top-10 中大部分是 verbalizer 词表中的词，
    说明提示词模板成功将模型输出约束到预期方向。
 2. 模型实际生成序列（贪心解码，10个token）
-   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答"是/否"或数字）。
+   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答"是/否"）。
 3. Verbalizer 概率分析
    统计预定义 verbalizer 词表中所有词的概率总和，评估约束强度。
    - 理想情况下，该总和应占模型首 token 概率质量的 70%~90% 以上。
    - 若过低（如 < 0.5），说明模型大量概率分散到非预期词，提示词模板或 verbalizer 词表需改进。
 
-【与 generate_adjective_c_r_vllm.py 的关系】
-- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 generate_adjective_c_r_vllm.py 完全一致。
-- 通过本脚本调试确认模板和 verbalizer 合理后，再运行 generate_adjective_c_r_vllm.py 进行批量生成，
-  可确保生成的概念向量质量。
-
 【使用方法】
 直接修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容、形容词、形容词定义等），然后运行：
-python scripts/inspect_prompt_template_vllm.py
+python scripts/inspect_prompt_template_vllm_binary.py
 """
 import math
 import os
@@ -69,6 +63,12 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": False,
         "prompt_suffix": "",
     },
+    "Qwen3-8B": {
+        "quantization": None,
+        "is_qwen3": True,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
     "Qwen3.5-9B": {
         "quantization": "fp8",
         "is_qwen3": True,
@@ -90,12 +90,6 @@ MODEL_LOADING_CONFIG = {
     "Baichuan2-7B-Chat": {
         "quantization": None,
         "is_qwen3": False,
-        "is_multimodal": False,
-        "prompt_suffix": "",
-    },
-    "Qwen3-8B": {
-        "quantization": None,
-        "is_qwen3": True,
         "is_multimodal": False,
         "prompt_suffix": "",
     },
@@ -179,20 +173,20 @@ def get_first_token_ids(word_list, tokenizer):
 
 def build_chat_messages(text_content, adjective, adj_definition=None):
     """
-    构建Likert Chat Template的messages列表。
-    逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
+    构建二值"是否"Chat Template的messages列表。
+    逻辑与 generate_adjective_c_r_vllm_binary.py 中的模板构建保持一致。
     """
     instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
                    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
                    "判断文本是否体现了该形容词所描述的特征。\n"
-                   "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。")
+                   "请直接回答\"是\"或\"否\"。")
     if adj_definition:
-        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n定义：{adj_definition}\n该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： "
+        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n定义：{adj_definition}\n该文本是否体现了\"{adjective}\"所描述的特征？回答： "
     else:
-        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： "
-    verbalizer_words = ["1", "2", "3", "4", "5"]
+        user_content = f"文本内容：{text_content}\n形容词：{adjective}\n该文本是否体现了\"{adjective}\"所描述的特征？回答： "
+    verbalizer_words = ["是", "否"]
     score_tokens = {
-        "likert": ["1", "2", "3", "4", "5"],
+        "binary": ["是", "否"],
     }
 
     messages = [
@@ -235,7 +229,7 @@ def main():
     prompt += prompt_suffix
 
     print("\n" + "=" * 60)
-    print("模型推理调试（vLLM版本）")
+    print("模型推理调试（vLLM版本 - 二值是否）")
     print("=" * 60)
     print(f"模型: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
@@ -314,26 +308,19 @@ def main():
         print(f"\nVerbalizer概率总和: {total_vprob:.6f}")
         print(f"Verbalizer占总概率比例: {total_vprob:.2%}")
 
-        # 分数计算（与generate_adjective_c_r_vllm.py保持一致）
+        # 分数计算（二值是否版本）
         print(f"\n{'=' * 60}")
-        print("概念向量分数计算")
+        print("概念向量分数计算（二值是否）")
         print(f"{'=' * 60}")
 
-        likert_ids = get_first_token_ids(score_tokens["likert"], tokenizer)
-        weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+        binary_ids = get_first_token_ids(score_tokens["binary"], tokenizer)
+        P_是 = probs_dict.get(binary_ids[0], 0.0)
+        P_否 = probs_dict.get(binary_ids[1], 0.0) if len(binary_ids) > 1 else 0.0
+        score = P_是 / (P_是 + P_否 + 1e-8)
 
-        level_probs_list = [probs_dict.get(tid, 0.0) for tid in likert_ids]
-        level_probs = torch.tensor(level_probs_list)
-        total_level_prob = level_probs.sum() + 1e-8
-        score = (weights * level_probs / total_level_prob).sum().item()
-
-        print(f"Level 1 (权重0.00): {level_probs_list[0]:.6f}")
-        print(f"Level 2 (权重0.25): {level_probs_list[1]:.6f}")
-        print(f"Level 3 (权重0.50): {level_probs_list[2]:.6f}")
-        print(f"Level 4 (权重0.75): {level_probs_list[3]:.6f}")
-        print(f"Level 5 (权重1.00): {level_probs_list[4]:.6f}")
-        print(f"Likert概率总和: {total_level_prob.item():.6f}")
-        print(f"加权期望概念分数: {score:.6f}")
+        print(f"P(是): {P_是:.6f}")
+        print(f"P(否): {P_否:.6f}")
+        print(f"二值概念分数 = P(是) / (P(是) + P(否)): {score:.6f}")
 
     print("=" * 60)
 

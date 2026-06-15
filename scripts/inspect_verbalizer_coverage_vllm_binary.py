@@ -1,14 +1,12 @@
-"""Verbalizer覆盖率全景分析工具（全形容词扫描，vLLM版本）
+"""Verbalizer覆盖率全景分析工具（二值"是否"版本，vLLM版本）
 
 【定位】
-本脚本是 generate_adjective_c_r_vllm.py 的"全形容词切片"评估工具。
-generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
-inspect_prompt_template_vllm.py 负责在单样本级别（一个文本 + 一个形容词）调试提示词和 verbalizer；
-而本脚本则对"一条固定文本 + 全部形容词（约236个）"进行扫描，评估该提示词模板和 verbalizer 词表
-在整个形容词词典上的覆盖能力是否稳定。
+本脚本是 inspect_verbalizer_coverage_vllm.py 的二值"是否"版本。
+与原版唯一区别在于提示词和verbalizer：使用"是/否"二值判断替代Likert五级评分，
+评估提示词模板在"是否"判断场景下的verbalizer覆盖能力。
 
 【核心功能】
-对单条文本遍历所有形容词，使用 vLLM 推理并提取 verbalizer token 的概率总和。
+对单条文本遍历所有形容词，使用 vLLM 推理并提取 verbalizer token（"是"/"否"）的概率。
 
 【评估标准】
 - total_prob 理想区间：0.6 ~ 1.0（多数形容词应在此范围内）
@@ -16,25 +14,16 @@ inspect_prompt_template_vllm.py 负责在单样本级别（一个文本 + 一个
     verbalizer 词表统计完整。
   - 低于 0.5：模型大量概率分散到非预期词（如"我"、"这"、"可能"等），说明提示词模板
     未能有效约束输出方向，或 verbalizer 词表遗漏了模型偏好的表达形式，需改进。
-- 通过观察 total_prob 在不同形容词上的波动，可识别出哪些类型的形容词容易导致模型输出失控，
-  从而针对性优化提示词或扩充 verbalizer 词表。
-
-【与 generate_adjective_c_r_vllm.py / inspect_prompt_template_vllm.py 的关系】
-- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 
-  generate_adjective_c_r_vllm.py 完全一致。
-- inspect_prompt_template_vllm.py 用于"点"级别的单样本调试（快速迭代提示词和 verbalizer）；
-- 本脚本用于"面"级别的全景验证（确认改进后的模板和 verbalizer 在整个形容词词典上表现稳定）；
-- 两者结合，确保 generate_adjective_c_r_vllm.py 批量生成的概念向量质量可靠。
+- binary_score = P("是") / (P("是") + P("否") + 1e-8)，反映模型对"是否"判断的倾向性。
 
 【输出】
 1. 可视化图表（PNG）：横轴为形容词索引，纵轴为概率值
-   - binary / ICL：三条线（pos_prob 绿色、neg_prob 红色、total_prob 蓝色）+ total 均值参考线
-   - likert：一条线（total_prob 蓝色）+ 均值参考线
+   - yes_prob(绿色)、no_prob(红色)、total_prob(蓝色) 三条线 + binary_score(橙色虚线)
 2. JSON 数据文件：每个形容词的详细概率数据 + 统计摘要（均值 / 最小值 / 最大值）
 
 【使用方法】
-1. 修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容等）
-2. 运行：python scripts/inspect_verbalizer_coverage_vllm.py
+1. 修改下方 CONFIG 区域的变量（模型名、文本内容等）
+2. 运行：python scripts/inspect_verbalizer_coverage_vllm_binary.py
 """
 import json
 import math
@@ -96,6 +85,12 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": True,
         "prompt_suffix": "",
     },
+    "Qwen3-8B": {
+        "quantization": None,
+        "is_qwen3": True,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
     "glm-4-9b-chat": {
         "quantization": None,
         "is_qwen3": False,
@@ -111,12 +106,6 @@ MODEL_LOADING_CONFIG = {
     "Baichuan2-7B-Chat": {
         "quantization": None,
         "is_qwen3": False,
-        "is_multimodal": False,
-        "prompt_suffix": "",
-    },
-    "Qwen3-8B": {
-        "quantization": None,
-        "is_qwen3": True,
         "is_multimodal": False,
         "prompt_suffix": "",
     },
@@ -200,13 +189,12 @@ def get_first_token_ids(word_list, tokenizer):
 
 def build_chat_messages(instruction, content, adj, adj_definition=None):
     """
-    构建Likert Chat Template的messages列表。
-    与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
+    构建二值"是否"Chat Template的messages列表。
     """
     if adj_definition:
-        user_content = f"文本内容：{content}\n形容词：{adj}\n定义：{adj_definition}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
+        user_content = f"文本内容：{content}\n形容词：{adj}\n定义：{adj_definition}\n该文本是否体现了\"{adj}\"所描述的特征？回答： "
     else:
-        user_content = f"文本内容：{content}\n形容词：{adj}\n该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： "
+        user_content = f"文本内容：{content}\n形容词：{adj}\n该文本是否体现了\"{adj}\"所描述的特征？回答： "
 
     messages = [
         {"role": "system", "content": instruction},
@@ -224,18 +212,18 @@ def analyze_verbalizer_coverage(
     model_name: str,
     is_qwen3=False,
     prompt_suffix="",
-    template="likert",
+    template="binary",
 ):
     """
-    对单条文本遍历所有形容词，使用 vLLM 计算 verbalizer 概率总和并可视化。
+    对单条文本遍历所有形容词，使用 vLLM 计算二值verbalizer（"是"/"否"）概率并可视化。
     """
-    # 定义Likert verbalizer token 和提示词指令
-    likert_tokens = ["1", "2", "3", "4", "5"]
-    likert_ids = get_first_token_ids(likert_tokens, tokenizer)
+    # 定义二值 verbalizer token 和提示词指令
+    binary_tokens = ["是", "否"]
+    binary_ids = get_first_token_ids(binary_tokens, tokenizer)
     instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
                    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
                    "判断文本是否体现了该形容词所描述的特征。\n"
-                   "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。")
+                   "请直接回答\"是\"或\"否\"。")
 
     # 加载形容词词典（含定义）
     adj_df = pd.read_csv(adjective_path)
@@ -284,27 +272,21 @@ def analyze_verbalizer_coverage(
 
         # 直接使用vLLM返回的原始概率，不手动应用temperature
 
-        level_probs = [probs_dict.get(tid, 0.0) for tid in likert_ids]
-        total_prob = sum(level_probs)
-        # 计算概率最高的数字分数（1-5映射到0.0-1.0）
-        max_level_idx = level_probs.index(max(level_probs))
-        max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
-        # 计算加权期望likert分数（与generate_adjective_c_r_vllm.py一致）
-        weights = [0.0, 0.25, 0.5, 0.75, 1.0]
-        total_prob_eps = total_prob + 1e-8
-        likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob_eps
+        yes_prob = probs_dict.get(binary_ids[0], 0.0)
+        no_prob = probs_dict.get(binary_ids[1], 0.0) if len(binary_ids) > 1 else 0.0
+        # 如果"是"和"否"映射到同一个token id，no_prob需要特殊处理
+        if len(binary_ids) == 1:
+            no_prob = 0.0
+        total_prob = yes_prob + no_prob
+        binary_score = yes_prob / (yes_prob + no_prob + 1e-8)
         results.append({
             "index": adj_idx,
             "adjective_en": adj_en_list[adj_idx],
             "adjective_cn": adjectives[adj_idx],
-            "level_1_prob": round(level_probs[0], 6),
-            "level_2_prob": round(level_probs[1], 6),
-            "level_3_prob": round(level_probs[2], 6),
-            "level_4_prob": round(level_probs[3], 6),
-            "level_5_prob": round(level_probs[4], 6),
+            "yes_prob": round(yes_prob, 6),
+            "no_prob": round(no_prob, 6),
             "total_prob": round(total_prob, 6),
-            "max_level_score": round(max_level_score, 6),
-            "likert_score": round(likert_score, 6),
+            "binary_score": round(binary_score, 6),
         })
 
     # 保存JSON数据
@@ -330,12 +312,14 @@ def analyze_verbalizer_coverage(
     fig, ax = plt.subplots(figsize=(16, 6))
     x = [r["index"] for r in results]
 
+    yes_probs = [r["yes_prob"] for r in results]
+    no_probs = [r["no_prob"] for r in results]
     total_probs = [r["total_prob"] for r in results]
-    max_level_scores = [r["max_level_score"] for r in results]
-    likert_scores = [r["likert_score"] for r in results]
-    ax.plot(x, total_probs, label="total_prob (Likert verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
-    ax.plot(x, max_level_scores, label="max_level_score (概率最高数字分数)", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
-    ax.plot(x, likert_scores, label="likert_score (加权期望分数)", color="green", alpha=0.8, linewidth=1.0, linestyle="-.")
+    binary_scores = [r["binary_score"] for r in results]
+    ax.plot(x, yes_probs, label="yes_prob (P(\"是\"))", color="green", alpha=0.9, linewidth=1.2)
+    ax.plot(x, no_probs, label="no_prob (P(\"否\"))", color="red", alpha=0.9, linewidth=1.2)
+    ax.plot(x, total_probs, label="total_prob (P(\"是\")+P(\"否\"))", color="blue", alpha=0.9, linewidth=1.2)
+    ax.plot(x, binary_scores, label="binary_score (P(\"是\")/(P(\"是\")+P(\"否\")))", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
 
     mean_total = sum(total_probs) / len(total_probs)
     ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")
@@ -343,7 +327,7 @@ def analyze_verbalizer_coverage(
     ax.set_xlabel("形容词索引", fontsize=12)
     ax.set_ylabel("概率", fontsize=12)
     ax.set_title(
-        f"Verbalizer覆盖率分析（vLLM）\n模型: {model_name} | 模板: likert | 文本: {text_content[:30]}...",
+        f"Verbalizer覆盖率分析（vLLM）\n模型: {model_name} | 模板: binary | 文本: {text_content[:30]}...",
         fontsize=14,
     )
     ax.legend(loc="upper right", fontsize=10)
@@ -383,7 +367,7 @@ def main():
     output_dir = config.base_path / OUTPUT_DIR
 
     print("\n" + "=" * 60)
-    print("Verbalizer覆盖率分析（vLLM版本）")
+    print("Verbalizer覆盖率分析（vLLM版本 - 二值\"是否\"）")
     print("=" * 60)
     print(f"模型名称: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
@@ -408,7 +392,7 @@ def main():
         model_name=MODEL_NAME,
         is_qwen3=qwen3_flag,
         prompt_suffix=prompt_suffix,
-        template="likert",
+        template="binary",
     )
 
 
