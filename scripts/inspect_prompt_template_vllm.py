@@ -27,6 +27,7 @@ generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容�
 python scripts/inspect_prompt_template_vllm.py
 """
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +35,11 @@ import pandas as pd
 import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+
+if "OMP_NUM_THREADS" in os.environ:
+    val = os.environ["OMP_NUM_THREADS"].strip()
+    if not val.isdigit() or int(val) <= 0:
+        os.environ.pop("OMP_NUM_THREADS")
 
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:

@@ -38,6 +38,7 @@ inspect_prompt_template_vllm.py 负责在单样本级别（一个文本 + 一个
 """
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -48,6 +49,11 @@ import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+
+if "OMP_NUM_THREADS" in os.environ:
+    val = os.environ["OMP_NUM_THREADS"].strip()
+    if not val.isdigit() or int(val) <= 0:
+        os.environ.pop("OMP_NUM_THREADS")
 
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
