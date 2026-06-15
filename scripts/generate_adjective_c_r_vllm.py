@@ -132,6 +132,12 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": False,
         "prompt_suffix": "\n",     # GLM-4首token为\n，追加\n使其直接输出数字
     },
+    "deepseek-llm-7b-chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",       # 待inspect确认后修改
+    },
 }
 
 

@@ -96,6 +96,12 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": False,
         "prompt_suffix": "\n",
     },
+    "deepseek-llm-7b-chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
 }
 
 
