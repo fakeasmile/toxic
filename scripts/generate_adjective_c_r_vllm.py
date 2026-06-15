@@ -121,7 +121,7 @@ MODEL_LOADING_CONFIG = {
         "prompt_suffix": "",       # Qwen首token带空格，已在提示词末尾加空格处理
     },
     "Qwen3.5-9B": {
-        "quantization": None,
+        "quantization": "fp8",
         "is_qwen3": True,
         "is_multimodal": True,
         "prompt_suffix": "",
