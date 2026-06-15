@@ -92,6 +92,13 @@ def parse_args():
         help='采样温度（默认2.0），用于控制概率分布的分散程度'
     )
 
+    parser.add_argument(
+        '--chunk_size',
+        type=int,
+        default=10,
+        help='分块推理的块大小（每次处理的文本数），默认10。增大可提升GPU利用率，减小可降低显存峰值'
+    )
+
     return parser.parse_args()
 
 
@@ -136,7 +143,13 @@ MODEL_LOADING_CONFIG = {
         "quantization": None,
         "is_qwen3": False,
         "is_multimodal": False,
-        "prompt_suffix": "",       # 待inspect确认后修改
+        "prompt_suffix": "",
+    },
+    "Baichuan2-7B-Chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
     },
 }
 
@@ -228,13 +241,16 @@ def build_chat_messages(instruction, content, adj, adj_definition=None):
     ]
     return messages
 
-def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, is_qwen3=False, prompt_suffix="", threshold=1e-4):
+def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path, temperature, tokenizer, llm_model, is_qwen3=False, prompt_suffix="", threshold=1e-4, chunk_size=10):
     """生成形容词概念向量。
 
     此函数对底层 LLM 完全透明：无论加载的是 Qwen2.5、Qwen3.5 还是后续新增的
     DeepSeek 等模型，核心推理流程（构建 prompt -> vLLM 批量推理 -> 提取首 token
     概率 -> Likert 加权期望）均保持一致。唯一的模型相关参数是 is_qwen3，它仅
     控制 tokenizer 的 enable_thinking 开关，不影响概念分数的计算逻辑。
+
+    使用分块推理：每次处理 chunk_size 条文本×所有形容词，提升vLLM的GPU利用率和
+    KV前缀缓存命中率。
     """
     # 定义Likert verbalizer token（首token id集合）和提示词指令
     likert_tokens = ["1", "2", "3", "4", "5"]
@@ -243,18 +259,13 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
     instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
                    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
                    "判断文本是否体现了该形容词所描述的特征。\n"
-                   "评估等级：\n"
-                   "1 = 完全不相关\n"
-                   "2 = 不太相关\n"
-                   "3 = 有点相关\n"
-                   "4 = 比较相关\n"
-                   "5 = 非常相关\n"
-                   "直接回答数字。")
+                   "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。")
 
     # 加载形容词词典（含定义）
     adj_df = pd.read_csv(adjective_path)
     adjectives = adj_df["chinese"].tolist()
     adj_definitions = adj_df["definition"].tolist() if "definition" in adj_df.columns else [None] * len(adjectives)
+    num_adjs = len(adjectives)
 
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
@@ -270,82 +281,96 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
     results = []
     concept_matrix = []  # 用于保存CSV矩阵 [N, V]
 
-    # 批量推理
-    for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples")):
-        content = sample["content"]  # 文本，后续将匹配V个形容词
-        concept_vector = []
-        raw_probs = []
+    # 分块推理：每次处理 chunk_size 条文本
+    num_samples = len(data_set)
+    num_chunks = (num_samples + chunk_size - 1) // chunk_size
 
-        # 在vllm中不手动分批次，构建一条文本+所有形容词的Chat Template
-        prompts = []  # 关于当前文本的所有Chat Template
-        for adj, adj_def in zip(adjectives, adj_definitions):
-            messages = build_chat_messages(instruction, content, adj, adj_def)
+    for chunk_idx in tqdm(range(num_chunks), desc=f"Processing chunks (size={chunk_size})"):
+        start = chunk_idx * chunk_size
+        end = min(start + chunk_size, num_samples)
+        chunk_samples = data_set[start:end]
 
-            # 添加<|im_start|>system,<|im_start|>user,<|im_start|>assistant特殊token
-            chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
-            prompt_text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                **chat_template_kwargs
-            )
-            # 追加模型特定的后缀（如GLM-4需要追加\n使其首token直接为数字）
-            prompt_text += prompt_suffix
-            prompts.append(prompt_text)
+        # 构建当前块内所有文本×所有形容词的prompt
+        all_prompts = []
+        # 记录每条文本对应的prompt数量，用于后续拆分结果
+        sample_prompt_counts = []
 
-        # 批量推理
-        outputs = llm_model.generate(prompts, sampling_params, use_tqdm=False)  # 表示对文本+所有形容词的推理结果
+        for sample in chunk_samples:
+            content = sample["content"]
+            prompts_for_sample = []
+            for adj, adj_def in zip(adjectives, adj_definitions):
+                messages = build_chat_messages(instruction, content, adj, adj_def)
 
-        for sample_info in outputs:  # sample_info表示文本+某个形容词的推理结果
-            # 提取logprobs
-            # sample_info.outputs[0]表示推理的第一个结果（n>1:同样的提示词会推理多个结果）
-            # logprobs列表，每个元素是字典，{token_id_1: Logprob对象, token_id_2: Logprob对象, ...}，每个元素表示推理生成的token位置的对数概率
-            logprobs = sample_info.outputs[0].logprobs
-            # 提取生成的首token的对数概率分布，个数由采样器中logprobs参数决定，转化为概率后表示在整个词表上的归一化概率
-            last_token_logprobs = logprobs[0]  # 结构：{token_id_1: Logprob对象, token_id_2: Logprob对象, ...}
+                chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **chat_template_kwargs
+                )
+                # 追加模型特定的后缀（如GLM-4需要追加\n使其首token直接为数字）
+                prompt_text += prompt_suffix
+                prompts_for_sample.append(prompt_text)
 
-            # 将last_token_logprobs中的对数概率转化为概率，存储在字典中
-            # 结构：{token_id: 概率值}
-            probs_dict = {}
-            for token_id in last_token_logprobs:
-                logprob_obj = last_token_logprobs[token_id]
-                probs_dict[token_id] = math.exp(logprob_obj.logprob)
+            all_prompts.extend(prompts_for_sample)
+            sample_prompt_counts.append(len(prompts_for_sample))
 
-            # 提取1-5等级的概率（直接使用vLLM返回的原始概率，不手动应用temperature）
-            level_probs = []
-            for tid in likert_ids:
-                level_probs.append(probs_dict.get(tid, 0.0))
+        # 批量推理：一次性送入当前块的所有prompt
+        outputs = llm_model.generate(all_prompts, sampling_params, use_tqdm=False)
 
-            weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
-            level_probs = torch.tensor(level_probs)
-            total_level_prob = level_probs.sum() + 1e-8
-            score = (weights * level_probs / total_level_prob).sum().item()
-            raw_probs.append(level_probs.tolist())
+        # 拆分结果：按每条文本的prompt数量切分
+        output_offset = 0
+        for i, sample in enumerate(chunk_samples):
+            concept_vector = []
+            raw_probs = []
+            count = sample_prompt_counts[i]
+            sample_outputs = outputs[output_offset:output_offset + count]
+            output_offset += count
 
-            concept_vector.append(score)
+            for sample_info in sample_outputs:
+                logprobs = sample_info.outputs[0].logprobs
+                last_token_logprobs = logprobs[0]
 
-        # 防御性校验，确保每条文本输出的形容词概念长度与形容词数量一致
-        if len(concept_vector) != len(adjectives):
-            raise RuntimeError(
-                f"concept_vector 长度异常：期望 {len(adjectives)}，实际 {len(concept_vector)}"
-            )
+                # 将logprobs转为概率字典
+                probs_dict = {}
+                for token_id in last_token_logprobs:
+                    logprob_obj = last_token_logprobs[token_id]
+                    probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
-        # 截断极小值：小于threshold的分数设为0
-        truncated_vector = []
-        for s in concept_vector:
-            if abs(s) >= threshold:
-                truncated_vector.append(s)
-            else:
-                truncated_vector.append(0.0)
-        concept_matrix.append(truncated_vector)
+                # 提取1-5等级的概率
+                level_probs = []
+                for tid in likert_ids:
+                    level_probs.append(probs_dict.get(tid, 0.0))
 
-        # 保存当前文本的推理结果（保留content、toxic、截断后的concept、Likert概率分布）
-        results.append({
-            "content": content,
-            "toxic": sample["toxic"],
-            "concept": truncated_vector,
-            "likert_probs": raw_probs  # V×5 Likert概率分布
-        })
+                weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+                level_probs = torch.tensor(level_probs)
+                total_level_prob = level_probs.sum() + 1e-8
+                score = (weights * level_probs / total_level_prob).sum().item()
+                raw_probs.append(level_probs.tolist())
+
+                concept_vector.append(score)
+
+            # 防御性校验
+            if len(concept_vector) != num_adjs:
+                raise RuntimeError(
+                    f"样本 {start + i} concept_vector 长度异常：期望 {num_adjs}，实际 {len(concept_vector)}"
+                )
+
+            # 截断极小值
+            truncated_vector = []
+            for s in concept_vector:
+                if abs(s) >= threshold:
+                    truncated_vector.append(s)
+                else:
+                    truncated_vector.append(0.0)
+            concept_matrix.append(truncated_vector)
+
+            results.append({
+                "content": sample["content"],
+                "toxic": sample["toxic"],
+                "concept": truncated_vector,
+                "likert_probs": raw_probs
+            })
 
     # 保存JSON文件（content + toxic）
     with open(output_path, "w", encoding="utf-8") as f:
@@ -394,7 +419,7 @@ def main():
     prompt_suffix = model_config.get("prompt_suffix", "")
     if prompt_suffix:
         print(f"检测到模型({args.model_name})需要追加prompt后缀: {repr(prompt_suffix)}")
-    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4)
+    generate_adj_concept(data_path, output_path, csv_output_path, config.adjective_path, args.temperature, tokenizer, llm_model, is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4, chunk_size=args.chunk_size)
 
     print("生成完成")
 

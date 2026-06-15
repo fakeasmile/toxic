@@ -166,13 +166,7 @@ def build_chat_messages(text_content, adjective, adj_definition=None):
     instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
                    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
                    "判断文本是否体现了该形容词所描述的特征。\n"
-                   "评估等级：\n"
-                   "1 = 完全不相关\n"
-                   "2 = 不太相关\n"
-                   "3 = 有点相关\n"
-                   "4 = 比较相关\n"
-                   "5 = 非常相关\n"
-                   "直接回答数字。")
+                   "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。")
     if adj_definition:
         user_content = f"文本内容：{text_content}\n形容词：{adjective}\n定义：{adj_definition}\n该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： "
     else:
