@@ -130,6 +130,9 @@ def parse_args():
     parser.add_argument('--hidden_features', type=int, default=None, help='隐藏层维度')
     parser.add_argument('--patience', type=int, default=None, help='早停耐心值 (验证集F1连续patience个epoch未提升则停止)')
 
+    # 概念向量类型
+    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (Likert评分) 或 binary (是否评分)')
+
     return parser.parse_args()
 
 
@@ -145,10 +148,17 @@ def update_MLPConfig(args):
     mlp_config.model_name = args.model_name
 
     # 动态生成依赖 dataset_name/model_name 的路径
-    mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                     / mlp_config.model_name / f"concept_train_{mlp_config.model_name}.json")
-    mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                    / mlp_config.model_name / f"concept_test_{mlp_config.model_name}.json")
+    concept_type = getattr(args, 'concept_type', 'likert')
+    if concept_type == 'binary':
+        mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                         / mlp_config.model_name / f"concept_train_{mlp_config.model_name}_binary.json")
+        mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                        / mlp_config.model_name / f"concept_test_{mlp_config.model_name}_binary.json")
+    else:
+        mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                         / mlp_config.model_name / f"concept_train_{mlp_config.model_name}.json")
+        mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                        / mlp_config.model_name / f"concept_test_{mlp_config.model_name}.json")
 
     # 随机种子
     if args.seed is not None:
@@ -545,7 +555,8 @@ def main():
             "anneal_strategy": config.anneal_strategy,
             "dropout_rate": config.dropout_rate,
             "hidden_features": config.hidden_features,
-            "patience": config.patience
+            "patience": config.patience,
+            "concept_type": getattr(args, 'concept_type', 'likert')
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)

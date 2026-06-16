@@ -369,8 +369,8 @@ def main():
     data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"  # 原始数据集目录
     concept_dir = config.processed_path / args.dataset_name / args.model_name  # 概念向量输出目录
     concept_dir.mkdir(parents=True, exist_ok=True)
-    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.json"
-    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.csv"
+    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_binary.json"
+    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_binary.csv"
     # 打印配置信息
     print("\n" + "=" * 60)
     print("形容词概念向量生成(二值是否版本, vLLM) - 配置信息")
