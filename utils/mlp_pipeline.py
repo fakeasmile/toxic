@@ -132,6 +132,7 @@ def parse_args():
 
     # 概念向量类型
     parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (Likert评分) 或 binary (是否评分)')
+    parser.add_argument('--use_two_stage', action='store_true', default=False, help='使用两阶段推理生成的概念向量（文件名含_two_stage后缀）')
 
     return parser.parse_args()
 
@@ -149,16 +150,19 @@ def update_MLPConfig(args):
 
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
+    use_two_stage = getattr(args, 'use_two_stage', False)
+
+    # 构建文件名后缀：binary加_binary，two_stage加_two_stage，可叠加
+    suffix = ""
     if concept_type == 'binary':
-        mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                         / mlp_config.model_name / f"concept_train_{mlp_config.model_name}_binary.json")
-        mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                        / mlp_config.model_name / f"concept_test_{mlp_config.model_name}_binary.json")
-    else:
-        mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                         / mlp_config.model_name / f"concept_train_{mlp_config.model_name}.json")
-        mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
-                                        / mlp_config.model_name / f"concept_test_{mlp_config.model_name}.json")
+        suffix += '_binary'
+    if use_two_stage:
+        suffix += '_two_stage'
+
+    mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                     / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{suffix}.json")
+    mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
+                                    / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
 
     # 随机种子
     if args.seed is not None:
