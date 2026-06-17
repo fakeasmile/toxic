@@ -290,7 +290,7 @@ def extract_likert_score(first_token_logprobs, likert_ids):
     total = level_probs_t.sum() + 1e-8  # 防零除
     score = (weights * level_probs_t / total).sum().item()
 
-    return score, level_probs.tolist()
+    return score, level_probs
 
 
 # =============================================================================
