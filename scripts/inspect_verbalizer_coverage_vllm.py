@@ -18,8 +18,7 @@ inspect_prompt_template_vllm.py 负责在单样本级别（一个文本 + 一个
 
 【输出】
 1. 可视化图表（PNG）：横轴为形容词索引，纵轴为概率值
-   - binary / ICL：三条线（pos_prob 绿色、neg_prob 红色、total_prob 蓝色）+ total 均值参考线
-   - likert：一条线（total_prob 蓝色）+ 均值参考线
+   - 一条线（total_prob 蓝色）+ 均值参考线
 2. JSON 数据文件：每个形容词的详细概率数据 + 统计摘要（均值 / 最小值 / 最大值）
 
 【使用方法】

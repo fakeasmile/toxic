@@ -7,7 +7,7 @@ class MLPConfig():
         self.base_path = Path(__file__).parent.parent  # 基目录
         self.raw_data_path = self.base_path / "data" / "raw"  # 原始数据根目录
         self.processed_path = self.base_path / "data" / "processed"  # 数据处理保存路径
-        self.adjective_path = self.raw_data_path / "adjective" / "toxic_adjectives_new.csv"  # 形容词词典路径
+        self.adjective_path = self.raw_data_path / "adjective" / "toxic_adjectives_v2.csv"  # 形容词词典路径
         self.models_path = self.base_path / "models"  # LLM模型路径
         self.experiment_path = self.base_path / "experiments"  # 实验结果保存目录
 
