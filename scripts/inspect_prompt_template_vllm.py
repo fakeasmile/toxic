@@ -143,21 +143,19 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         trust_remote_code=True,
         dtype="auto",
         gpu_memory_utilization=gpu_memory_utilization,
-        enable_prefix_caching=True,
-        max_model_len=2048,
-        max_num_seqs=256,
-        max_num_batched_tokens=4096,
+        enable_prefix_caching=True,    # 启用前缀缓存，加速system指令复用
+        max_model_len=1024,
+        max_num_seqs=64,
+        max_num_batched_tokens=16384,
     )
     if quantization is not None:
         llm_kwargs["quantization"] = quantization
 
+    # 多模态模型：纯文本推理时跳过视觉编码器，释放显存
     if is_multimodal:
-        # 纯文本推理时跳过视觉编码器，释放显存给KV Cache
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         llm_kwargs["language_model_only"] = True
-        llm_kwargs["max_num_seqs"] = 64
-        llm_kwargs["max_model_len"] = 1024
-        print(f"检测到多模态模型({model_name})，已启用纯文本推理优化（language_model_only + 跳过视觉编码器）")
+        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt + language_model_only")
 
     print(f"Loading vLLM model from {llm_path}")
     print(f"  量化方式: {quantization if quantization else '无量化'}")
@@ -175,47 +173,62 @@ def get_first_token_ids(word_list, tokenizer):
             token_ids.append(encoded[0])
 
     if not token_ids:
-        raise ValueError("get_first_token_ids ERROR")
+        raise ValueError("get_first_token_ids ERROR: 词表中无有效token")
 
     return list(dict.fromkeys(token_ids))
 
 
-def build_chat_messages(text_content, adjective, adj_definition=None, use_two_stage=False, implicit_analysis=None):
+# 单阶段模式的system instruction（与generate_adjective_c_r_vllm.py一致）
+SINGLE_STAGE_INSTRUCTION = (
+    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
+    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
+    "判断文本是否体现了该形容词所描述的特征。\n"
+    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+)
+
+# 两阶段模式Stage 2的system instruction（与generate_adjective_c_r_vllm.py一致）
+STAGE2_INSTRUCTION = (
+    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
+    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
+    "判断文本是否体现了该形容词所描述的特征。\n"
+    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+)
+
+# 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
+STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
+STAGE1_USER_TEMPLATE = (
+    "分析以下文本是否包含隐含语义，从以下角度简要分析：\n"
+    "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
+    "2. 文化隐喻或间接攻击\n"
+    "3. 反讽或阴阳怪气\n"
+    "如果包含隐含语义，简要说明；如果不包含，回答\"无\"。\n"
+    "文本内容：{content}\n"
+    "分析："
+)
+
+
+def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False):
     """
     构建Likert Chat Template的messages列表。
     逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    if use_two_stage:
-        instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-                       "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
-                       "判断文本是否体现了该形容词所描述的特征。\n"
-                       "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。")
-    else:
-        instruction = ("你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-                       "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
-                       "判断文本是否体现了该形容词所描述的特征。\n"
-                       "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。")
+    instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
 
-    user_lines = [f"文本内容：{text_content}"]
+    user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
         user_lines.append(f"隐含语义：{implicit_analysis}")
-    user_lines.append(f"形容词：{adjective}")
+    user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"该文本在多大程度上体现了\"{adjective}\"所描述的特征？回答： ")
+    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
-
-    verbalizer_words = ["1", "2", "3", "4", "5"]
-    score_tokens = {
-        "likert": ["1", "2", "3", "4", "5"],
-    }
 
     messages = [
         {"role": "system", "content": instruction},
         {"role": "user", "content": user_content},
     ]
 
-    return messages, verbalizer_words, score_tokens
+    return messages
 
 
 def main():
@@ -234,18 +247,9 @@ def main():
     # Stage 1：生成隐含语义分析（仅两阶段模式）
     implicit_analysis = None
     if USE_TWO_STAGE:
-        stage1_system = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
-        stage1_user = (
-            "分析以下文本是否包含隐含语义，从以下角度简要分析：\n"
-            "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
-            "2. 文化隐喻或间接攻击\n"
-            "3. 反讽或阴阳怪气\n"
-            "如果包含隐含语义，简要说明；如果不包含，回答\"无\"。\n"
-            f"文本内容：{TEXT_CONTENT}\n"
-            "分析："
-        )
+        stage1_user = STAGE1_USER_TEMPLATE.format(content=TEXT_CONTENT)
         stage1_messages = [
-            {"role": "system", "content": stage1_system},
+            {"role": "system", "content": STAGE1_SYSTEM},
             {"role": "user", "content": stage1_user},
         ]
         chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
@@ -262,10 +266,14 @@ def main():
         print(f"\nStage 1 隐含语义分析: {implicit_analysis}")
 
     # 构建Chat Template messages
-    messages, verbalizer_words, score_tokens = build_chat_messages(
+    messages = build_chat_messages(
         TEXT_CONTENT, ADJECTIVE, adj_definition,
-        use_two_stage=USE_TWO_STAGE, implicit_analysis=implicit_analysis
+        implicit_analysis=implicit_analysis, use_two_stage=USE_TWO_STAGE
     )
+
+    # verbalizer词表（与generate_adjective_c_r_vllm.py一致）
+    verbalizer_words = ["1", "2", "3", "4", "5"]
+    score_tokens = {"likert": ["1", "2", "3", "4", "5"]}
 
     # 生成完整prompt文本
     chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
