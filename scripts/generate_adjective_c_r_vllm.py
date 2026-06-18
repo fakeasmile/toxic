@@ -203,11 +203,11 @@ STAGE2_INSTRUCTION = (
 # 两阶段模式Stage 1的提示词：让LLM分析文本的隐含语义
 STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
 STAGE1_USER_TEMPLATE = (
-    "分析以下文本是否包含隐含语义，从以下角度简要分析：\n"
+    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
     "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
     "2. 文化隐喻或间接攻击\n"
     "3. 反讽或阴阳怪气\n"
-    "如果包含隐含语义，简要说明；如果不包含，回答\"无\"。\n"
+    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
     "文本内容：{content}\n"
     "分析："
 )
@@ -334,8 +334,8 @@ def generate_stage1_analysis(data_set, tokenizer, llm_model, is_qwen3=False, pro
         prompt_text += prompt_suffix
         stage1_prompts.append(prompt_text)
 
-    # 批量推理：max_tokens=80控制分析长度，temperature=0保证确定性
-    stage1_params = SamplingParams(max_tokens=80, temperature=0)
+    # 批量推理：max_tokens=150保证分析完整，temperature=0保证确定性
+    stage1_params = SamplingParams(max_tokens=150, temperature=0)
     print(f"Stage 1：为 {len(data_set)} 条文本生成隐含语义分析...")
     outputs = llm_model.generate(stage1_prompts, stage1_params, use_tqdm=True)
 

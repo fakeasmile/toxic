@@ -197,11 +197,11 @@ STAGE2_INSTRUCTION = (
 # 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
 STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
 STAGE1_USER_TEMPLATE = (
-    "分析以下文本是否包含隐含语义，从以下角度简要分析：\n"
+    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
     "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
     "2. 文化隐喻或间接攻击\n"
     "3. 反讽或阴阳怪气\n"
-    "如果包含隐含语义，简要说明；如果不包含，回答\"无\"。\n"
+    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
     "文本内容：{content}\n"
     "分析："
 )
@@ -260,7 +260,7 @@ def main():
         prompt_suffix = model_config.get("prompt_suffix", "")
         stage1_prompt += prompt_suffix
 
-        stage1_params = SamplingParams(max_tokens=80, temperature=0)
+        stage1_params = SamplingParams(max_tokens=150, temperature=0)
         stage1_outputs = llm_model.generate([stage1_prompt], stage1_params, use_tqdm=False)
         implicit_analysis = stage1_outputs[0].outputs[0].text.strip()
         print(f"\nStage 1 隐含语义分析: {implicit_analysis}")
