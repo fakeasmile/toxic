@@ -190,28 +190,28 @@ def get_first_token_ids(word_list, tokenizer):
 
 # 单阶段模式的system instruction（与generate_adjective_c_r_vllm.py一致）
 SINGLE_STAGE_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
+    "你是一位语言分析专家，擅长识别文本的语用意图。\n"
+    "在评估时，请综合考虑文本的字面意思和说话者的真实意图，\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
 # 两阶段模式Stage 2的system instruction（与generate_adjective_c_r_vllm.py一致）
 STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
+    "你是一位语言分析专家，擅长识别文本的语用意图。\n"
+    "在评估时，请综合考虑文本的字面意思和意图分析，\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
 # 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
-STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
+STAGE1_SYSTEM = "你是一位语用分析专家，擅长分析文本中说话者的真实意图。"
 STAGE1_USER_TEMPLATE = (
-    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
-    "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
-    "2. 文化隐喻或间接攻击\n"
-    "3. 反讽或阴阳怪气\n"
-    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
+    "简要分析以下文本的语用意图（总字数不超过80字）：\n"
+    "1. 说话者是在攻击/贬低，还是在讨论/提及？\n"
+    "2. 如果存在攻击意图，对象是谁或什么群体？\n"
+    "3. 攻击是直接的还是间接的（如暗示、反讽、暗语等）？\n"
+    "如果文本没有攻击或贬低任何人的意图，回答\"无\"。\n"
     "文本内容：{content}\n"
     "分析："
 )
@@ -226,7 +226,7 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
 
     user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
-        user_lines.append(f"隐含语义：{implicit_analysis}")
+        user_lines.append(f"意图分析：{implicit_analysis}")
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
@@ -424,7 +424,7 @@ def main():
     if prompt_suffix:
         print(f"检测到模型({MODEL_NAME})需要追加prompt后缀: {repr(prompt_suffix)}")
 
-    # Stage 1：生成隐含语义分析（仅两阶段模式）
+    # Stage 1：生成语用意图分析（仅两阶段模式）
     implicit_analysis = None
     if USE_TWO_STAGE:
         stage1_user = STAGE1_USER_TEMPLATE.format(content=TEXT_CONTENT)
@@ -441,7 +441,7 @@ def main():
         stage1_params = SamplingParams(max_tokens=150, temperature=0)
         stage1_outputs = llm_model.generate([stage1_prompt], stage1_params, use_tqdm=False)
         implicit_analysis = stage1_outputs[0].outputs[0].text.strip()
-        print(f"Stage 1 隐含语义分析: {implicit_analysis}")
+        print(f"Stage 1 语用意图分析: {implicit_analysis}")
 
     analyze_verbalizer_coverage(
         text_content=TEXT_CONTENT,

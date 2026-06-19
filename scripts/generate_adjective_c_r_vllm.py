@@ -6,8 +6,8 @@
 【两种推理模式】
 1. 单阶段模式（默认）：直接让LLM评估文本与形容词的相关程度
 2. 两阶段模式（--use_two_stage）：
-   - Stage 1：让LLM分析文本的隐含语义（谐音暗语、文化隐喻、反讽等），结果缓存
-   - Stage 2：将隐含语义分析注入prompt，再进行Likert评分
+   - Stage 1：让LLM分析文本的语用意图（攻击/贬低 vs 讨论/提及），结果缓存
+   - Stage 2：将意图分析注入prompt，再进行Likert评分
 
 【Verbalizer提取流程】
 1. 构建Chat Template prompt → LLM推理（max_tokens=1, temperature=0）
@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument('--temperature', type=float, default=2.0,
                         help='采样温度（默认2.0），用于控制概率分布的分散程度')
     parser.add_argument('--use_two_stage', action='store_true',
-                        help='启用两阶段推理：Stage1生成隐含语义分析，Stage2基于分析进行Likert评分')
+                        help='启用两阶段推理：Stage1生成语用意图分析，Stage2基于分析进行Likert评分')
     return parser.parse_args()
 
 
@@ -184,30 +184,30 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
 # =============================================================================
 # 提示词定义
 # =============================================================================
-# 单阶段模式的system instruction：提示LLM考虑隐含语义
+# 单阶段模式的system instruction：提示LLM考虑语用意图
 SINGLE_STAGE_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
+    "你是一位语言分析专家，擅长识别文本的语用意图。\n"
+    "在评估时，请综合考虑文本的字面意思和说话者的真实意图，\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
-# 两阶段模式Stage 2的system instruction：提示LLM综合考虑隐含语义分析
+# 两阶段模式Stage 2的system instruction：提示LLM综合考虑意图分析
 STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
+    "你是一位语言分析专家，擅长识别文本的语用意图。\n"
+    "在评估时，请综合考虑文本的字面意思和意图分析，\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
-# 两阶段模式Stage 1的提示词：让LLM分析文本的隐含语义
-STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
+# 两阶段模式Stage 1的提示词：让LLM分析文本的语用意图
+STAGE1_SYSTEM = "你是一位语用分析专家，擅长分析文本中说话者的真实意图。"
 STAGE1_USER_TEMPLATE = (
-    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
-    "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
-    "2. 文化隐喻或间接攻击\n"
-    "3. 反讽或阴阳怪气\n"
-    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
+    "简要分析以下文本的语用意图（总字数不超过80字）：\n"
+    "1. 说话者是在攻击/贬低，还是在讨论/提及？\n"
+    "2. 如果存在攻击意图，对象是谁或什么群体？\n"
+    "3. 攻击是直接的还是间接的（如暗示、反讽、暗语等）？\n"
+    "如果文本没有攻击或贬低任何人的意图，回答\"无\"。\n"
     "文本内容：{content}\n"
     "分析："
 )
@@ -220,12 +220,12 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
     """构建Likert评分的Chat Template messages。
 
     根据use_two_stage自动选择instruction：
-    - False（单阶段）：instruction提示考虑隐含意思
-    - True（两阶段）：instruction提示综合考虑隐含语义分析
+    - False（单阶段）：instruction提示考虑说话者真实意图
+    - True（两阶段）：instruction提示综合考虑意图分析
 
     user_content结构：
         文本内容：{content}
-        隐含语义：{analysis}    ← 仅两阶段模式且有分析结果时插入
+        意图分析：{analysis}    ← 仅两阶段模式且有分析结果时插入
         形容词：{adj}
         定义：{adj_definition}  ← 仅当定义存在时插入
         该文本在多大程度上体现了"{adj}"所描述的特征？回答：
@@ -234,7 +234,7 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
 
     user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
-        user_lines.append(f"隐含语义：{implicit_analysis}")
+        user_lines.append(f"意图分析：{implicit_analysis}")
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
@@ -294,12 +294,12 @@ def extract_likert_score(first_token_logprobs, likert_ids):
 
 
 # =============================================================================
-# Stage 1：隐含语义分析
+# Stage 1：语用意图分析
 # =============================================================================
 def generate_stage1_analysis(data_set, tokenizer, llm_model, is_qwen3=False, prompt_suffix="", cache_path=None):
-    """Stage 1：为每条文本生成隐含语义分析，结果缓存到文件。
+    """Stage 1：为每条文本生成语用意图分析，结果缓存到文件。
 
-    每条文本只运行1次Stage 1，其分析结果被该文本的所有177个形容词共享。
+    每条文本只运行1次Stage 1，其分析结果被该文本的所有形容词共享。
     缓存机制保证可复现性：同一文本的分析内容在多次运行间完全一致。
 
     Args:
@@ -311,7 +311,7 @@ def generate_stage1_analysis(data_set, tokenizer, llm_model, is_qwen3=False, pro
         cache_path: 缓存文件路径，已存在则直接读取
 
     Returns:
-        list[str]: 每条文本的隐含语义分析文本
+        list[str]: 每条文本的语用意图分析文本
     """
     # 缓存已存在则直接读取
     if cache_path and cache_path.exists():
@@ -336,7 +336,7 @@ def generate_stage1_analysis(data_set, tokenizer, llm_model, is_qwen3=False, pro
 
     # 批量推理：max_tokens=150保证分析完整，temperature=0保证确定性
     stage1_params = SamplingParams(max_tokens=150, temperature=0)
-    print(f"Stage 1：为 {len(data_set)} 条文本生成隐含语义分析...")
+    print(f"Stage 1：为 {len(data_set)} 条文本生成语用意图分析...")
     outputs = llm_model.generate(stage1_prompts, stage1_params, use_tqdm=True)
 
     analyses = [output.outputs[0].text.strip() for output in outputs]
@@ -365,7 +365,7 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
 
     流程：
     1. 加载形容词词典和数据集
-    2. [两阶段] Stage 1：为每条文本生成隐含语义分析
+    2. [两阶段] Stage 1：为每条文本生成语用意图分析
     3. 逐文本处理：构建prompt → vLLM推理 → 提取首token概率 → Likert加权期望
     4. 保存结果（JSON含完整信息，CSV为纯矩阵）
     """
@@ -384,7 +384,7 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
 
-    # --- Stage 1：隐含语义分析（仅两阶段模式） ---
+    # --- Stage 1：语用意图分析（仅两阶段模式） ---
     implicit_analyses = None
     if use_two_stage:
         implicit_analyses = generate_stage1_analysis(
