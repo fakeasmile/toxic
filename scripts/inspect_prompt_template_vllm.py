@@ -195,13 +195,13 @@ STAGE2_INSTRUCTION = (
 )
 
 # 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
-STAGE1_SYSTEM = "你是一位语用分析专家，擅长分析文本中说话者的真实意图。"
+STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别文本中的隐含意图。"
 STAGE1_USER_TEMPLATE = (
-    "简要分析以下文本的语用意图（总字数不超过80字）：\n"
-    "1. 说话者是在攻击/贬低，还是在讨论/提及？\n"
-    "2. 如果存在攻击意图，对象是谁或什么群体？\n"
-    "3. 攻击是直接的还是间接的（如暗示、反讽、暗语等）？\n"
-    "如果文本没有攻击或贬低任何人的意图，回答\"无\"。\n"
+    "简要分析以下文本（总字数不超过80字）：\n"
+    "1. 措辞方式：直接陈述/间接暗示/反讽嘲讽/模糊表达？\n"
+    "2. 中性解读和攻击解读，哪个更能解释文本的措辞选择？\n"
+    "3. 如果目标群体听到这句话，最可能的感受：被尊重/无感/被轻视/被攻击？\n"
+    "如果中性解读更合理且目标群体不会感到被轻视或攻击，回答\"无\"。\n"
     "文本内容：{content}\n"
     "分析："
 )
@@ -244,7 +244,7 @@ def main():
         if not match.empty and "definition" in adj_df.columns:
             adj_definition = match.iloc[0]["definition"]
 
-    # Stage 1：生成语用意图分析（仅两阶段模式）
+    # Stage 1：生成隐含意图分析（仅两阶段模式）
     implicit_analysis = None
     if USE_TWO_STAGE:
         stage1_user = STAGE1_USER_TEMPLATE.format(content=TEXT_CONTENT)
@@ -263,7 +263,7 @@ def main():
         stage1_params = SamplingParams(max_tokens=150, temperature=0)
         stage1_outputs = llm_model.generate([stage1_prompt], stage1_params, use_tqdm=False)
         implicit_analysis = stage1_outputs[0].outputs[0].text.strip()
-        print(f"\nStage 1 语用意图分析: {implicit_analysis}")
+        print(f"\nStage 1 隐含意图分析: {implicit_analysis}")
 
     # 构建Chat Template messages
     messages = build_chat_messages(
