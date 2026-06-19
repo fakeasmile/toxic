@@ -180,28 +180,28 @@ def get_first_token_ids(word_list, tokenizer):
 
 # 单阶段模式的system instruction（与generate_adjective_c_r_vllm.py一致）
 SINGLE_STAGE_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本的语用意图。\n"
-    "在评估时，请综合考虑文本的字面意思和说话者的真实意图，\n"
+    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
+    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
 # 两阶段模式Stage 2的system instruction（与generate_adjective_c_r_vllm.py一致）
 STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本的语用意图。\n"
-    "在评估时，请综合考虑文本的字面意思和意图分析，\n"
+    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
+    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
 # 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
-STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别文本中的隐含意图。"
+STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
 STAGE1_USER_TEMPLATE = (
-    "简要分析以下文本（总字数不超过80字）：\n"
-    "1. 措辞方式：直接陈述/间接暗示/反讽嘲讽/模糊表达？\n"
-    "2. 中性解读和攻击解读，哪个更能解释文本的措辞选择？\n"
-    "3. 如果目标群体听到这句话，最可能的感受：被尊重/无感/被轻视/被攻击？\n"
-    "如果中性解读更合理且目标群体不会感到被轻视或攻击，回答\"无\"。\n"
+    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
+    "1. 谐音暗语（如\"鲨bee\"=\"傻逼\"，\"默\"=\"黑\"）\n"
+    "2. 文化隐喻或间接攻击\n"
+    "3. 反讽或阴阳怪气\n"
+    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
     "文本内容：{content}\n"
     "分析："
 )
@@ -216,7 +216,7 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
 
     user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
-        user_lines.append(f"意图分析：{implicit_analysis}")
+        user_lines.append(f"隐含语义：{implicit_analysis}")
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
@@ -244,7 +244,7 @@ def main():
         if not match.empty and "definition" in adj_df.columns:
             adj_definition = match.iloc[0]["definition"]
 
-    # Stage 1：生成隐含意图分析（仅两阶段模式）
+    # Stage 1：生成隐含语义分析（仅两阶段模式）
     implicit_analysis = None
     if USE_TWO_STAGE:
         stage1_user = STAGE1_USER_TEMPLATE.format(content=TEXT_CONTENT)
@@ -263,7 +263,7 @@ def main():
         stage1_params = SamplingParams(max_tokens=150, temperature=0)
         stage1_outputs = llm_model.generate([stage1_prompt], stage1_params, use_tqdm=False)
         implicit_analysis = stage1_outputs[0].outputs[0].text.strip()
-        print(f"\nStage 1 隐含意图分析: {implicit_analysis}")
+        print(f"\nStage 1 隐含语义分析: {implicit_analysis}")
 
     # 构建Chat Template messages
     messages = build_chat_messages(
@@ -297,7 +297,7 @@ def main():
     print(f"形容词定义: {adj_definition}")
     print(f"两阶段模式: {'是' if USE_TWO_STAGE else '否'}")
     if USE_TWO_STAGE and implicit_analysis:
-        print(f"意图分析: {implicit_analysis}")
+        print(f"隐含语义: {implicit_analysis}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
     print(f"采样温度: {TEMPERATURE}")
     print(f"提示词: {prompt}")
