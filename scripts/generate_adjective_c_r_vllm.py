@@ -558,8 +558,9 @@ def main():
         print(f"检测到模型({args.model_name})需要追加prompt后缀: {repr(prompt_suffix)}")
 
     # 执行概念向量生成
+    adjective_path = config.adjective_path
     generate_adj_concept(
-        data_path, output_path, csv_output_path, config.adjective_path,
+        data_path, output_path, csv_output_path, adjective_path,
         args.temperature, tokenizer, llm_model,
         is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4,
         use_two_stage=args.use_two_stage, stage1_cache_path=stage1_cache_path,

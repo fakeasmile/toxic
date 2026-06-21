@@ -298,6 +298,7 @@ def train(config, train_dataset, val_dataset, test_dataset):
         dropout_rate=config.dropout_rate,
         hidden_features=config.hidden_features
     ).to(device)
+    print(f">>> 使用标准MLP")
 
     # 损失函数、优化器、学习率调度器
     criterion = nn.CrossEntropyLoss()
