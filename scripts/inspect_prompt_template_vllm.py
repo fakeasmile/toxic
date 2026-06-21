@@ -58,9 +58,6 @@ ADJECTIVE = "包容的"
 # 两阶段模式开关
 USE_TWO_STAGE = False  # 设为True启用两阶段推理
 
-# 概念向量视角
-PERSPECTIVE = "aboutness"  # aboutness(文本体现了什么特征) 或 intent(说话者在实施什么行为)
-
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
 TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
@@ -197,21 +194,6 @@ STAGE2_INSTRUCTION = (
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
-# ---- Intent视角（与generate_adjective_c_r_vllm.py一致）----
-INTENT_SINGLE_STAGE_INSTRUCTION = (
-    "你是一位语用分析专家，擅长识别说话者的真实意图。\n"
-    "在评估时，请综合考虑文本的字面意思和可能的隐含意思，\n"
-    "判断说话者是否在实施或表达该形容词所描述的行为，而非仅仅提及或讨论该话题。\n"
-    "请用1到5的数字评估实施程度，1表示完全没有实施，5表示确实在实施。只回答一个数字。"
-)
-
-INTENT_STAGE2_INSTRUCTION = (
-    "你是一位语用分析专家，擅长识别说话者的真实意图。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
-    "判断说话者是否在实施或表达该形容词所描述的行为，而非仅仅提及或讨论该话题。\n"
-    "请用1到5的数字评估实施程度，1表示完全没有实施，5表示确实在实施。只回答一个数字。"
-)
-
 # 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
 STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
 STAGE1_USER_TEMPLATE = (
@@ -225,15 +207,12 @@ STAGE1_USER_TEMPLATE = (
 )
 
 
-def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False, perspective='aboutness'):
+def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False):
     """
     构建Likert Chat Template的messages列表。
     逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    if perspective == 'intent':
-        instruction = INTENT_STAGE2_INSTRUCTION if use_two_stage else INTENT_SINGLE_STAGE_INSTRUCTION
-    else:
-        instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
+    instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
 
     user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
@@ -241,10 +220,7 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    if perspective == 'intent':
-        user_lines.append(f"说话者在多大程度上实施了\"{adj}\"所描述的行为？回答： ")
-    else:
-        user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
 
     messages = [
@@ -292,8 +268,7 @@ def main():
     # 构建Chat Template messages
     messages = build_chat_messages(
         TEXT_CONTENT, ADJECTIVE, adj_definition,
-        implicit_analysis=implicit_analysis, use_two_stage=USE_TWO_STAGE,
-        perspective=PERSPECTIVE
+        implicit_analysis=implicit_analysis, use_two_stage=USE_TWO_STAGE
     )
 
     # verbalizer词表（与generate_adjective_c_r_vllm.py一致）
@@ -321,7 +296,6 @@ def main():
     print(f"形容词: {ADJECTIVE}")
     print(f"形容词定义: {adj_definition}")
     print(f"两阶段模式: {'是' if USE_TWO_STAGE else '否'}")
-    print(f"概念向量视角: {PERSPECTIVE}")
     if USE_TWO_STAGE and implicit_analysis:
         print(f"隐含语义: {implicit_analysis}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
