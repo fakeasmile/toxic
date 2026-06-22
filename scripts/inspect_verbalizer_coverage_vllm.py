@@ -65,6 +65,9 @@ TEXT_CONTENT = "什么被害妄想猎巫man"
 # 两阶段模式开关
 USE_TWO_STAGE = False  # 设为True启用两阶段推理
 
+# 对比提示模式开关
+USE_CONTRASTIVE = False  # 设为True启用对比提示评分（讨论/提及 vs 实施/表达）
+
 # 输出目录（相对于项目根目录）
 OUTPUT_DIR = "experiments/verbalizer_coverage"
 
@@ -204,6 +207,21 @@ STAGE2_INSTRUCTION = (
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
+# ---- 对比模式（对比判断）：讨论/提及 vs 实施/表达 ----
+CONTRASTIVE_SINGLE_STAGE_INSTRUCTION = (
+    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
+    "在评估时，请判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
+    "请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等）。\n"
+    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
+)
+
+CONTRASTIVE_STAGE2_INSTRUCTION = (
+    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
+    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
+    "判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
+    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
+)
+
 # 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
 STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
 STAGE1_USER_TEMPLATE = (
@@ -217,12 +235,15 @@ STAGE1_USER_TEMPLATE = (
 )
 
 
-def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False):
+def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False, contrastive=False):
     """
     构建Likert Chat Template的messages列表。
     逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
+    if contrastive:
+        instruction = CONTRASTIVE_STAGE2_INSTRUCTION if use_two_stage else CONTRASTIVE_SINGLE_STAGE_INSTRUCTION
+    else:
+        instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
 
     user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
@@ -230,7 +251,10 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    if contrastive:
+        user_lines.append(f"该文本与\"{adj}\"的关系：1=主要在讨论/提及，5=主要在实施/表达。回答： ")
+    else:
+        user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
 
     messages = [
@@ -279,7 +303,7 @@ def analyze_verbalizer_coverage(
     # 构建所有提示词
     prompts = []
     for adj, adj_def in zip(adjectives, adj_definitions):
-        messages = build_chat_messages(text_content, adj, adj_def, implicit_analysis=implicit_analysis, use_two_stage=use_two_stage)
+        messages = build_chat_messages(text_content, adj, adj_def, implicit_analysis=implicit_analysis, use_two_stage=use_two_stage, contrastive=USE_CONTRASTIVE)
 
         chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
         prompt_text = tokenizer.apply_chat_template(
@@ -411,6 +435,7 @@ def main():
     print(f"模型名称: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"两阶段模式: {'是' if USE_TWO_STAGE else '否'}")
+    print(f"对比提示模式: {'是' if USE_CONTRASTIVE else '否'}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
     print(f"采样温度: {TEMPERATURE}")
     print(f"输出目录: {output_dir}")

@@ -71,6 +71,8 @@ def parse_args():
                         help='采样温度（默认2.0），用于控制概率分布的分散程度')
     parser.add_argument('--use_two_stage', action='store_true',
                         help='启用两阶段推理：Stage1生成隐含语义分析，Stage2基于分析进行Likert评分')
+    parser.add_argument('--contrastive', action='store_true',
+                        help='使用对比提示评分：将Likert量表从"相关性"改为"讨论/提及 vs 实施/表达"对比维度')
     return parser.parse_args()
 
 
@@ -184,6 +186,7 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
 # =============================================================================
 # 提示词定义
 # =============================================================================
+# ---- 标准模式（绝对判断）：文本是否体现了该特征 ----
 # 单阶段模式的system instruction：提示LLM考虑隐含意思
 SINGLE_STAGE_INSTRUCTION = (
     "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
@@ -198,6 +201,23 @@ STAGE2_INSTRUCTION = (
     "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+)
+
+# ---- 对比模式（对比判断）：讨论/提及 vs 实施/表达 ----
+# 单阶段模式的system instruction
+CONTRASTIVE_SINGLE_STAGE_INSTRUCTION = (
+    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
+    "在评估时，请判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
+    "请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等）。\n"
+    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
+)
+
+# 两阶段模式Stage 2的system instruction
+CONTRASTIVE_STAGE2_INSTRUCTION = (
+    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
+    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
+    "判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
+    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
 )
 
 # 两阶段模式Stage 1的提示词：让LLM分析文本的隐含语义
@@ -216,22 +236,26 @@ STAGE1_USER_TEMPLATE = (
 # =============================================================================
 # Prompt构建
 # =============================================================================
-def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False):
+def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False, contrastive=False):
     """构建Likert评分的Chat Template messages。
 
-    根据use_two_stage自动选择instruction：
-    - 单阶段：SINGLE_STAGE_INSTRUCTION
-    - 两阶段：STAGE2_INSTRUCTION
+    根据use_two_stage和contrastive自动选择instruction：
+    - 标准模式：SINGLE_STAGE_INSTRUCTION / STAGE2_INSTRUCTION
+    - 对比模式：CONTRASTIVE_SINGLE_STAGE_INSTRUCTION / CONTRASTIVE_STAGE2_INSTRUCTION
 
     user_content结构：
         文本内容：{content}
         隐含语义：{analysis}    ← 仅两阶段模式且有分析结果时插入
         形容词：{adj}
         定义：{adj_definition}  ← 仅当定义存在时插入
-        该文本在多大程度上体现了"{adj}"所描述的特征？回答：
+        提问方式（标准）：该文本在多大程度上体现了"{adj}"所描述的特征？回答：
+        提问方式（对比）：该文本与"{adj}"的关系：1=主要在讨论/提及，5=主要在实施/表达。回答：
     """
-    # 根据模式选择instruction
-    instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
+    # 根据模式和对比标志选择instruction
+    if contrastive:
+        instruction = CONTRASTIVE_STAGE2_INSTRUCTION if use_two_stage else CONTRASTIVE_SINGLE_STAGE_INSTRUCTION
+    else:
+        instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
 
     user_lines = [f"文本内容：{content}"]
     if implicit_analysis:
@@ -239,7 +263,11 @@ def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=Non
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    # 根据模式选择提问方式
+    if contrastive:
+        user_lines.append(f"该文本与\"{adj}\"的关系：1=主要在讨论/提及，5=主要在实施/表达。回答： ")
+    else:
+        user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
 
     return [
@@ -358,7 +386,7 @@ def generate_stage1_analysis(data_set, tokenizer, llm_model, is_qwen3=False, pro
 def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path,
                          temperature, tokenizer, llm_model,
                          is_qwen3=False, prompt_suffix="", threshold=1e-4,
-                         use_two_stage=False, stage1_cache_path=None):
+                         use_two_stage=False, stage1_cache_path=None, contrastive=False):
     """生成形容词概念向量。
 
     对数据集中每条文本，遍历所有形容词，通过verbalizer技术提取Likert评分，
@@ -409,7 +437,8 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
         for adj, adj_def in zip(adjectives, adj_definitions):
             messages = build_chat_messages(
                 content, adj, adj_def,
-                implicit_analysis=analysis, use_two_stage=use_two_stage
+                implicit_analysis=analysis, use_two_stage=use_two_stage,
+                contrastive=contrastive
             )
             chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
             prompt_text = tokenizer.apply_chat_template(
@@ -477,8 +506,10 @@ def main():
     concept_dir = config.processed_path / args.dataset_name / args.model_name
     concept_dir.mkdir(parents=True, exist_ok=True)
 
-    # 两阶段模式下输出文件名加_two_stage后缀
+    # 两阶段模式下输出文件名加_two_stage后缀，对比模式加_contrastive后缀
     suffix = "_two_stage" if args.use_two_stage else ""
+    if args.contrastive:
+        suffix += "_contrastive"
     output_path = concept_dir / f"concept_{args.mode}_{args.model_name}{suffix}.json"
     csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}{suffix}.csv"
 
@@ -497,6 +528,7 @@ def main():
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"采样温度: {args.temperature}")
     print(f"两阶段模式: {'是' if args.use_two_stage else '否'}")
+    print(f"对比提示模式: {'是' if args.contrastive else '否'}")
     if args.use_two_stage:
         print(f"Stage 1缓存路径: {stage1_cache_path}")
     print(f"数据集路径: {data_path}")
@@ -524,6 +556,7 @@ def main():
         args.temperature, tokenizer, llm_model,
         is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4,
         use_two_stage=args.use_two_stage, stage1_cache_path=stage1_cache_path,
+        contrastive=args.contrastive,
     )
 
     print("生成完成")
