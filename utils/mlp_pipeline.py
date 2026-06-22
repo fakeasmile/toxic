@@ -1,45 +1,25 @@
 """MLP训练与测试。
 
 整合训练和测试功能,实现训练完成后自动测试的流水线。
-支持命令行参数配置,确保训练-测试配置一致性。
+超参数统一在 MLP_config.py 中配置,命令行仅指定数据集和模型。
 
 使用示例:
     # 1. 训练+测试
-    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct --epochs 500 --patience 20
-    
+    python utils/mlp_pipeline.py --mode all --dataset_name TOXICN --model_name glm-4-9b-chat
+
     # 2. 仅测试模式 (必须指定实验时间戳)
-    python utils/mlp_pipeline.py --mode test --timestamp 20260415-085433
+    python utils/mlp_pipeline.py --mode test --dataset_name TOXICN --model_name glm-4-9b-chat --timestamp 20260415-085433
 
 命令行参数说明:
-    运行模式:
-        --mode              运行模式: all (训练+测试, 默认), train (仅训练), test (仅测试)
-        --timestamp         测试模式时的实验时间戳 (如: 20260415-085433)
-    
-    数据集配置:
-        --dataset_name      数据集名称 (TOXICN/COLD, 默认: TOXICN)
-        --model_name        LLM模型名称 (默认: Qwen2.5-7B-Instruct)
-    
-    随机种子:
-        --seed              随机种子 (默认: 1)
-        --use_deterministic 启用确定性模式 (确保实验可复现，默认：False)
-    
-    训练超参数:
-        --batch_size        批次大小 (默认: 16)
-        --epochs            训练轮数 (默认: 200)
-        --max_lr            峰值学习率 (默认: 1e-3)
-        --pct_start         Warmup比例 (默认: 0.2)
-        --div_factor        初始学习率除数 (默认: 25.0)
-        --final_div_factor  最终学习率除数 (默认: 10000.0)
-        --anneal_strategy   衰减策略: cos (余弦) 或 linear (线性), 默认: cos
-    
-    MLP模型结构参数:
-        --dropout_rate      Dropout比率 (默认: 0.5)
-        --hidden_features   隐藏层维度 (默认: 96)
-        --patience          早停耐心值 (默认: 20)
+    --mode              运行模式: all (训练+测试, 默认), train (仅训练), test (仅测试)
+    --timestamp         测试模式时的实验时间戳 (如: 20260415-085433)
+    --dataset_name      数据集名称 (TOXICN/COLD), 必填
+    --model_name        LLM模型名称, 必填
+    --concept_type      概念向量类型: likert (默认) 或 binary
 
-参数优先级:
-    - 训练模式: 命令行参数 > MLP_config.py（命令行参数覆盖MLP_config参数）
-    - 测试模式: 强制使用实验目录的 config.json (忽略命令行超参数)
+超参数配置:
+    所有训练超参数（学习率、批次大小、epoch数、dropout等）均在 MLP_config.py 中配置。
+    测试模式强制使用实验目录的 config.json,忽略当前配置。
 
 输出文件:
     实验目录结构 (experiments/<timestamp>/):
@@ -52,7 +32,7 @@
             └── predictions.json     # 逐条预测结果
 
 注意事项:
-    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_adjective_c_r.py)
+    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_adjective_c_r_vllm.py)
     2. 测试模式必须指定有效的实验时间戳
 """
 
@@ -109,39 +89,17 @@ def parse_args():
     )
 
     # 数据集配置
-    parser.add_argument('--dataset_name', type=str, default='TOXICN', help='数据集名称 (TOXICN/COLD)')
-    parser.add_argument('--model_name', type=str, default='Qwen2.5-7B-Instruct', help='LLM模型名称')
-
-    # 随机种子
-    parser.add_argument('--seed', type=int, default=None, help='随机种子')
-    parser.add_argument('--use_deterministic', action='store_true', default=False, help='启用确定性模式')
-
-    # 训练超参数
-    parser.add_argument('--batch_size', type=int, default=None, help='批次大小')
-    parser.add_argument('--epochs', type=int, default=None, help='训练轮数')
-    parser.add_argument('--max_lr', type=float, default=None, help='峰值学习率')
-    parser.add_argument('--pct_start', type=float, default=None, help='Warmup比例')
-    parser.add_argument('--div_factor', type=float, default=None, help='初始学习率除数')
-    parser.add_argument('--final_div_factor', type=float, default=None, help='最终学习率除数')
-    parser.add_argument('--anneal_strategy', type=str, default=None, help='衰减策略 (cos/linear)')
-
-    # 模型结构参数
-    parser.add_argument('--dropout_rate', type=float, default=None, help='Dropout比率')
-    parser.add_argument('--hidden_features', type=int, default=None, help='隐藏层维度')
-    parser.add_argument('--patience', type=int, default=None, help='早停耐心值 (验证集F1连续patience个epoch未提升则停止)')
+    parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称 (TOXICN/COLD)')
+    parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
 
     # 概念向量类型
     parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (Likert评分) 或 binary (是否评分)')
-    parser.add_argument('--use_two_stage', action='store_true', default=False, help='使用两阶段推理生成的概念向量（文件名含_two_stage后缀）')
 
     return parser.parse_args()
 
 
 def update_MLPConfig(args):
-    """基于MLP_config参数，根据命令行参数更新配置对象
-
-    优先级: 命令行参数 > MLPConfig默认值
-    """
+    """基于命令行参数更新配置对象"""
     mlp_config = MLPConfig()  # MLP_config.py中的配置对象
 
     # 数据集配置
@@ -150,51 +108,16 @@ def update_MLPConfig(args):
 
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
-    use_two_stage = getattr(args, 'use_two_stage', False)
 
-    # 构建文件名后缀：binary加_binary，two_stage加_two_stage，可叠加
+    # 构建文件名后缀：binary加_binary
     suffix = ""
     if concept_type == 'binary':
         suffix += '_binary'
-    if use_two_stage:
-        suffix += '_two_stage'
 
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                      / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{suffix}.json")
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                     / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
-
-    # 随机种子
-    if args.seed is not None:
-        mlp_config.seed = args.seed
-
-    # 确定性模式
-    if args.use_deterministic:  # store_true默认为False，只有显式传入才为True
-        mlp_config.use_deterministic = True
-
-    # 训练超参数
-    if args.batch_size is not None:
-        mlp_config.batch_size = args.batch_size
-    if args.epochs is not None:
-        mlp_config.epochs = args.epochs
-    if args.max_lr is not None:
-        mlp_config.max_lr = args.max_lr
-    if args.pct_start is not None:
-        mlp_config.pct_start = args.pct_start
-    if args.div_factor is not None:
-        mlp_config.div_factor = args.div_factor
-    if args.final_div_factor is not None:
-        mlp_config.final_div_factor = args.final_div_factor
-    if args.anneal_strategy is not None:
-        mlp_config.anneal_strategy = args.anneal_strategy
-
-    # 模型结构参数
-    if args.dropout_rate is not None:
-        mlp_config.dropout_rate = args.dropout_rate
-    if args.hidden_features is not None:
-        mlp_config.hidden_features = args.hidden_features
-    if args.patience is not None:
-        mlp_config.patience = args.patience
 
     return mlp_config
 
@@ -422,7 +345,11 @@ def evaluate(config, timestamp):
     :param config: MLPConfig 配置对象（用于获取base_path）
     :param timestamp: 实验时间戳
     """
-    experiment_dir = config.base_path / "experiments" / timestamp
+    # 训练时experiment_path已含时间戳，测试时需要拼接
+    if timestamp and config.experiment_path.name != timestamp:
+        experiment_dir = config.experiment_path / timestamp
+    else:
+        experiment_dir = config.experiment_path
     if not experiment_dir.exists():
         raise FileNotFoundError(f"实验目录不存在: {experiment_dir}")
 
@@ -542,15 +469,24 @@ def main():
 
         # 保存完整配置到config.json
         config_dict = {
+            # 实验元信息
             "timestamp": timestamp,
             "experiment_path": str(config.experiment_path),
+            "concept_type": getattr(args, 'concept_type', 'likert'),
+
+            # 数据与词典
             "dataset_name": config.dataset_name,
             "model_name": config.model_name,
+            "adjective_path": str(config.adjective_path),
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
-            "processed_path": str(config.processed_path),
+            "concept_dim": config.train_concept_path.stem,  # 概念向量文件名（含维度信息）
+
+            # 随机种子
             "seed": config.seed,
             "use_deterministic": config.use_deterministic,
+
+            # 训练超参数
             "batch_size": config.batch_size,
             "epochs": config.epochs,
             "max_lr": config.max_lr,
@@ -558,10 +494,11 @@ def main():
             "div_factor": config.div_factor,
             "final_div_factor": config.final_div_factor,
             "anneal_strategy": config.anneal_strategy,
+
+            # 模型结构
             "dropout_rate": config.dropout_rate,
             "hidden_features": config.hidden_features,
             "patience": config.patience,
-            "concept_type": getattr(args, 'concept_type', 'likert')
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)

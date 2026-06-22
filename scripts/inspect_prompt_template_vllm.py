@@ -11,7 +11,7 @@ generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容�
    观察模型在第一个输出位置的概率分布。如果 Top-10 中大部分是 verbalizer 词表中的词，
    说明提示词模板成功将模型输出约束到预期方向。
 2. 模型实际生成序列（贪心解码，10个token）
-   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答"是/否"或数字）。
+   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答1-5数字）。
 3. Verbalizer 概率分析
    统计预定义 verbalizer 词表中所有词的概率总和，评估约束强度。
    - 理想情况下，该总和应占模型首 token 概率质量的 70%~90% 以上。
@@ -55,12 +55,8 @@ MODEL_NAME = "Qwen2.5-7B-Instruct"  # models目录下的模型文件夹名
 TEXT_CONTENT = "什么被害妄想猎巫man"
 ADJECTIVE = "包容的"
 
-# 两阶段模式开关
-USE_TWO_STAGE = False  # 设为True启用两阶段推理
-
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
-TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
 # ===================================================================
 
 
@@ -225,7 +221,6 @@ def main():
 
     # verbalizer词表（与generate_adjective_c_r_vllm.py一致）
     verbalizer_words = ["1", "2", "3", "4", "5"]
-    score_tokens = {"likert": ["1", "2", "3", "4", "5"]}
 
     # 生成完整prompt文本
     chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
@@ -248,7 +243,6 @@ def main():
     print(f"形容词: {ADJECTIVE}")
     print(f"形容词定义: {adj_definition}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
-    print(f"采样温度: {TEMPERATURE}")
     print(f"提示词: {prompt}")
 
     print(f"\n提示词token数: {len(tokenizer.encode(prompt))}")

@@ -57,8 +57,6 @@ def parse_args():
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.85,
                         help='vLLM GPU显存占用比例（0.0-1.0），默认0.85')
-    parser.add_argument('--temperature', type=float, default=2.0,
-                        help='采样温度（默认2.0），用于控制概率分布的分散程度')
     return parser.parse_args()
 
 
@@ -256,7 +254,7 @@ def extract_likert_score(first_token_logprobs, likert_ids):
 # 核心流程：生成形容词概念向量
 # =============================================================================
 def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path,
-                         temperature, tokenizer, llm_model,
+                         tokenizer, llm_model,
                          is_qwen3=False, prompt_suffix="", threshold=1e-4):
     """生成形容词概念向量。
 
@@ -371,7 +369,6 @@ def main():
     print(f"LLM模型名称: {args.model_name}")
     print(f"当前模式: {args.mode}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
-    print(f"采样温度: {args.temperature}")
     print(f"数据集路径: {data_path}")
     print(f"JSON输出路径: {output_path}")
     print(f"CSV输出路径: {csv_output_path}")
@@ -394,7 +391,7 @@ def main():
     adjective_path = config.adjective_path
     generate_adj_concept(
         data_path, output_path, csv_output_path, adjective_path,
-        args.temperature, tokenizer, llm_model,
+        tokenizer, llm_model,
         is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4,
     )
 

@@ -62,15 +62,11 @@ MODEL_NAME = "Qwen2.5-7B-Instruct"  # models目录下的模型文件夹名（可
 # 文本内容（直接修改即可）
 TEXT_CONTENT = "什么被害妄想猎巫man"
 
-# 两阶段模式开关
-USE_TWO_STAGE = False  # 设为True启用两阶段推理
-
 # 输出目录（相对于项目根目录）
 OUTPUT_DIR = "experiments/verbalizer_coverage"
 
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
-TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
 # ===================================================================
 
 
@@ -385,7 +381,6 @@ def main():
     print(f"模型名称: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
-    print(f"采样温度: {TEMPERATURE}")
     print(f"输出目录: {output_dir}")
     print("=" * 60 + "\n")
 
