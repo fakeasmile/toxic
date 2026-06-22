@@ -58,9 +58,6 @@ ADJECTIVE = "包容的"
 # 两阶段模式开关
 USE_TWO_STAGE = False  # 设为True启用两阶段推理
 
-# 对比提示模式开关
-USE_CONTRASTIVE = False  # 设为True启用对比提示评分（讨论/提及 vs 实施/表达）
-
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
 TEMPERATURE = 2.0  # 采样温度（默认2.0），用于控制概率分布的分散程度
@@ -181,74 +178,29 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-# 单阶段模式的system instruction（与generate_adjective_c_r_vllm.py一致）
-SINGLE_STAGE_INSTRUCTION = (
+# system instruction（与generate_adjective_c_r_vllm.py一致）
+SYSTEM_INSTRUCTION = (
     "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
     "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
-# 两阶段模式Stage 2的system instruction（与generate_adjective_c_r_vllm.py一致）
-STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
-    "判断文本是否体现了该形容词所描述的特征。\n"
-    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
-)
 
-# ---- 对比模式（对比判断）：讨论/提及 vs 实施/表达 ----
-CONTRASTIVE_SINGLE_STAGE_INSTRUCTION = (
-    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
-    "在评估时，请判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
-    "请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等）。\n"
-    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
-)
-
-CONTRASTIVE_STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
-    "判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
-    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
-)
-
-# 两阶段模式Stage 1的提示词（与generate_adjective_c_r_vllm.py一致）
-STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
-STAGE1_USER_TEMPLATE = (
-    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
-    "1. 谐音暗语或缩写替代（如同音字、拼音缩写、数字暗语等）\n"
-    "2. 文化隐喻、标签化或间接攻击\n"
-    "3. 反讽、阴阳怪气或语气暗示\n"
-    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
-    "文本内容：{content}\n"
-    "分析："
-)
-
-
-def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False, contrastive=False):
+def build_chat_messages(content, adj, adj_definition=None):
     """
     构建Likert Chat Template的messages列表。
     逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
     """
-    if contrastive:
-        instruction = CONTRASTIVE_STAGE2_INSTRUCTION if use_two_stage else CONTRASTIVE_SINGLE_STAGE_INSTRUCTION
-    else:
-        instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
-
     user_lines = [f"文本内容：{content}"]
-    if implicit_analysis:
-        user_lines.append(f"隐含语义：{implicit_analysis}")
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    if contrastive:
-        user_lines.append(f"该文本与\"{adj}\"的关系：1=主要在讨论/提及，5=主要在实施/表达。回答： ")
-    else:
-        user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
 
     messages = [
-        {"role": "system", "content": instruction},
+        {"role": "system", "content": SYSTEM_INSTRUCTION},
         {"role": "user", "content": user_content},
     ]
 
@@ -268,33 +220,8 @@ def main():
         if not match.empty and "definition" in adj_df.columns:
             adj_definition = match.iloc[0]["definition"]
 
-    # Stage 1：生成隐含语义分析（仅两阶段模式）
-    implicit_analysis = None
-    if USE_TWO_STAGE:
-        stage1_user = STAGE1_USER_TEMPLATE.format(content=TEXT_CONTENT)
-        stage1_messages = [
-            {"role": "system", "content": STAGE1_SYSTEM},
-            {"role": "user", "content": stage1_user},
-        ]
-        chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
-        stage1_prompt = tokenizer.apply_chat_template(
-            stage1_messages, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
-        )
-        model_config = get_model_loading_config(MODEL_NAME)
-        prompt_suffix = model_config.get("prompt_suffix", "")
-        stage1_prompt += prompt_suffix
-
-        stage1_params = SamplingParams(max_tokens=150, temperature=0)
-        stage1_outputs = llm_model.generate([stage1_prompt], stage1_params, use_tqdm=False)
-        implicit_analysis = stage1_outputs[0].outputs[0].text.strip()
-        print(f"\nStage 1 隐含语义分析: {implicit_analysis}")
-
     # 构建Chat Template messages
-    messages = build_chat_messages(
-        TEXT_CONTENT, ADJECTIVE, adj_definition,
-        implicit_analysis=implicit_analysis, use_two_stage=USE_TWO_STAGE,
-        contrastive=USE_CONTRASTIVE
-    )
+    messages = build_chat_messages(TEXT_CONTENT, ADJECTIVE, adj_definition)
 
     # verbalizer词表（与generate_adjective_c_r_vllm.py一致）
     verbalizer_words = ["1", "2", "3", "4", "5"]
@@ -320,10 +247,6 @@ def main():
     print(f"文本内容: {TEXT_CONTENT}")
     print(f"形容词: {ADJECTIVE}")
     print(f"形容词定义: {adj_definition}")
-    print(f"两阶段模式: {'是' if USE_TWO_STAGE else '否'}")
-    print(f"对比提示模式: {'是' if USE_CONTRASTIVE else '否'}")
-    if USE_TWO_STAGE and implicit_analysis:
-        print(f"隐含语义: {implicit_analysis}")
     print(f"GPU显存占用: {GPU_MEMORY_UTILIZATION}")
     print(f"采样温度: {TEMPERATURE}")
     print(f"提示词: {prompt}")

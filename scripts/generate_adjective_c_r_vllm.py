@@ -3,12 +3,6 @@
 核心思路：利用LLM的verbalizer token技术，提取首token概率分布，
 量化文本与各形容词之间的相关程度，构建可解释的概念向量。
 
-【两种推理模式】
-1. 单阶段模式（默认）：直接让LLM评估文本与形容词的相关程度
-2. 两阶段模式（--use_two_stage）：
-   - Stage 1：让LLM分析文本的隐含语义（谐音暗语、文化隐喻、反讽等），结果缓存
-   - Stage 2：将隐含语义分析注入prompt，再进行Likert评分
-
 【Verbalizer提取流程】
 1. 构建Chat Template prompt → LLM推理（max_tokens=1, temperature=0）
 2. 提取首token的Top-20 logprobs → exp()转为概率
@@ -20,11 +14,7 @@
 - inspect_verbalizer_coverage_vllm.py：全景扫描（1文本+全部形容词），验证verbalizer覆盖率
 
 使用示例：
-# 单阶段模式
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct
-
-# 两阶段模式
-python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct --use_two_stage
 """
 
 import argparse
@@ -69,10 +59,6 @@ def parse_args():
                         help='vLLM GPU显存占用比例（0.0-1.0），默认0.85')
     parser.add_argument('--temperature', type=float, default=2.0,
                         help='采样温度（默认2.0），用于控制概率分布的分散程度')
-    parser.add_argument('--use_two_stage', action='store_true',
-                        help='启用两阶段推理：Stage1生成隐含语义分析，Stage2基于分析进行Likert评分')
-    parser.add_argument('--contrastive', action='store_true',
-                        help='使用对比提示评分：将Likert量表从"相关性"改为"讨论/提及 vs 实施/表达"对比维度')
     return parser.parse_args()
 
 
@@ -186,92 +172,36 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
 # =============================================================================
 # 提示词定义
 # =============================================================================
-# ---- 标准模式（绝对判断）：文本是否体现了该特征 ----
-# 单阶段模式的system instruction：提示LLM考虑隐含意思
-SINGLE_STAGE_INSTRUCTION = (
+# system instruction：提示LLM考虑隐含意思
+SYSTEM_INSTRUCTION = (
     "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
     "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
     "判断文本是否体现了该形容词所描述的特征。\n"
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
-# 两阶段模式Stage 2的system instruction：提示LLM综合考虑隐含语义分析
-STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
-    "判断文本是否体现了该形容词所描述的特征。\n"
-    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
-)
-
-# ---- 对比模式（对比判断）：讨论/提及 vs 实施/表达 ----
-# 单阶段模式的system instruction
-CONTRASTIVE_SINGLE_STAGE_INSTRUCTION = (
-    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
-    "在评估时，请判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
-    "请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等）。\n"
-    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
-)
-
-# 两阶段模式Stage 2的system instruction
-CONTRASTIVE_STAGE2_INSTRUCTION = (
-    "你是一位语言分析专家，擅长区分文本中\"讨论/提及\"与\"实施/表达\"的区别。\n"
-    "在评估时，请综合考虑文本的字面意思和隐含语义分析，\n"
-    "判断文本与该形容词的关系：是在讨论或提及相关话题，还是在亲自实施或表达该形容词所描述的行为。\n"
-    "请用1到5的数字评估，1表示主要在讨论/提及，5表示主要在实施/表达。只回答一个数字。"
-)
-
-# 两阶段模式Stage 1的提示词：让LLM分析文本的隐含语义
-STAGE1_SYSTEM = "你是一位语言分析专家，擅长识别中文文本中的隐含语义。"
-STAGE1_USER_TEMPLATE = (
-    "简要分析以下文本是否包含隐含语义（总字数不超过80字）：\n"
-    "1. 谐音暗语或缩写替代（如同音字、拼音缩写、数字暗语等）\n"
-    "2. 文化隐喻、标签化或间接攻击\n"
-    "3. 反讽、阴阳怪气或语气暗示\n"
-    "如果包含，简要说明；如果不包含，回答\"无\"。\n"
-    "文本内容：{content}\n"
-    "分析："
-)
-
 
 # =============================================================================
 # Prompt构建
 # =============================================================================
-def build_chat_messages(content, adj, adj_definition=None, implicit_analysis=None, use_two_stage=False, contrastive=False):
+def build_chat_messages(content, adj, adj_definition=None):
     """构建Likert评分的Chat Template messages。
-
-    根据use_two_stage和contrastive自动选择instruction：
-    - 标准模式：SINGLE_STAGE_INSTRUCTION / STAGE2_INSTRUCTION
-    - 对比模式：CONTRASTIVE_SINGLE_STAGE_INSTRUCTION / CONTRASTIVE_STAGE2_INSTRUCTION
 
     user_content结构：
         文本内容：{content}
-        隐含语义：{analysis}    ← 仅两阶段模式且有分析结果时插入
         形容词：{adj}
         定义：{adj_definition}  ← 仅当定义存在时插入
-        提问方式（标准）：该文本在多大程度上体现了"{adj}"所描述的特征？回答：
-        提问方式（对比）：该文本与"{adj}"的关系：1=主要在讨论/提及，5=主要在实施/表达。回答：
+        该文本在多大程度上体现了"{adj}"所描述的特征？回答：
     """
-    # 根据模式和对比标志选择instruction
-    if contrastive:
-        instruction = CONTRASTIVE_STAGE2_INSTRUCTION if use_two_stage else CONTRASTIVE_SINGLE_STAGE_INSTRUCTION
-    else:
-        instruction = STAGE2_INSTRUCTION if use_two_stage else SINGLE_STAGE_INSTRUCTION
-
     user_lines = [f"文本内容：{content}"]
-    if implicit_analysis:
-        user_lines.append(f"隐含语义：{implicit_analysis}")
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    # 根据模式选择提问方式
-    if contrastive:
-        user_lines.append(f"该文本与\"{adj}\"的关系：1=主要在讨论/提及，5=主要在实施/表达。回答： ")
-    else:
-        user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
 
     return [
-        {"role": "system", "content": instruction},
+        {"role": "system", "content": SYSTEM_INSTRUCTION},
         {"role": "user", "content": user_content},
     ]
 
@@ -323,70 +253,11 @@ def extract_likert_score(first_token_logprobs, likert_ids):
 
 
 # =============================================================================
-# Stage 1：隐含语义分析
-# =============================================================================
-def generate_stage1_analysis(data_set, tokenizer, llm_model, is_qwen3=False, prompt_suffix="", cache_path=None):
-    """Stage 1：为每条文本生成隐含语义分析，结果缓存到文件。
-
-    每条文本只运行1次Stage 1，其分析结果被该文本的所有形容词共享。
-    缓存机制保证可复现性：同一文本的分析内容在多次运行间完全一致。
-
-    Args:
-        data_set: 数据集列表，每条含"content"字段
-        tokenizer: tokenizer
-        llm_model: vLLM模型
-        is_qwen3: 是否为Qwen3+模型（需禁用thinking）
-        prompt_suffix: 模型特定的prompt后缀
-        cache_path: 缓存文件路径，已存在则直接读取
-
-    Returns:
-        list[str]: 每条文本的隐含语义分析文本
-    """
-    # 缓存已存在则直接读取
-    if cache_path and cache_path.exists():
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-        print(f"Stage 1缓存已存在，直接读取: {cache_path} ({len(cached)}条)")
-        return cached
-
-    # 构建所有文本的Stage 1 prompt
-    stage1_prompts = []
-    for sample in data_set:
-        messages = [
-            {"role": "system", "content": STAGE1_SYSTEM},
-            {"role": "user", "content": STAGE1_USER_TEMPLATE.format(content=sample["content"])},
-        ]
-        chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
-        prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
-        )
-        prompt_text += prompt_suffix
-        stage1_prompts.append(prompt_text)
-
-    # 批量推理：max_tokens=150保证分析完整，temperature=0保证确定性
-    stage1_params = SamplingParams(max_tokens=150, temperature=0)
-    print(f"Stage 1：为 {len(data_set)} 条文本生成隐含语义分析...")
-    outputs = llm_model.generate(stage1_prompts, stage1_params, use_tqdm=True)
-
-    analyses = [output.outputs[0].text.strip() for output in outputs]
-
-    # 缓存到文件
-    if cache_path:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(analyses, f, ensure_ascii=False, indent=2)
-        print(f"Stage 1分析已缓存: {cache_path}")
-
-    return analyses
-
-
-# =============================================================================
 # 核心流程：生成形容词概念向量
 # =============================================================================
 def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path,
                          temperature, tokenizer, llm_model,
-                         is_qwen3=False, prompt_suffix="", threshold=1e-4,
-                         use_two_stage=False, stage1_cache_path=None, contrastive=False):
+                         is_qwen3=False, prompt_suffix="", threshold=1e-4):
     """生成形容词概念向量。
 
     对数据集中每条文本，遍历所有形容词，通过verbalizer技术提取Likert评分，
@@ -394,9 +265,8 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
 
     流程：
     1. 加载形容词词典和数据集
-    2. [两阶段] Stage 1：为每条文本生成隐含语义分析
-    3. 逐文本处理：构建prompt → vLLM推理 → 提取首token概率 → Likert加权期望
-    4. 保存结果（JSON含完整信息，CSV为纯矩阵）
+    2. 逐文本处理：构建prompt → vLLM推理 → 提取首token概率 → Likert加权期望
+    3. 保存结果（JSON含完整信息，CSV为纯矩阵）
     """
     # --- 准备工作 ---
     # Likert verbalizer token id
@@ -413,16 +283,7 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
 
-    # --- Stage 1：隐含语义分析（仅两阶段模式） ---
-    implicit_analyses = None
-    if use_two_stage:
-        implicit_analyses = generate_stage1_analysis(
-            data_set, tokenizer, llm_model,
-            is_qwen3=is_qwen3, prompt_suffix=prompt_suffix,
-            cache_path=stage1_cache_path
-        )
-
-    # --- Stage 2：Likert评分 ---
+    # --- Likert评分 ---
     sampling_params = SamplingParams(max_tokens=1, temperature=0, logprobs=20)
 
     results = []
@@ -430,16 +291,11 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
 
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples")):
         content = sample["content"]
-        analysis = implicit_analyses[sample_idx] if implicit_analyses else None
 
         # 为当前文本构建所有形容词的prompt
         prompts = []
         for adj, adj_def in zip(adjectives, adj_definitions):
-            messages = build_chat_messages(
-                content, adj, adj_def,
-                implicit_analysis=analysis, use_two_stage=use_two_stage,
-                contrastive=contrastive
-            )
+            messages = build_chat_messages(content, adj, adj_def)
             chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
             prompt_text = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
@@ -474,12 +330,10 @@ def generate_adj_concept(data_path, output_path, csv_output_path, adjective_path
             "concept": truncated_vector,
             "likert_probs": raw_probs,
         }
-        if use_two_stage and analysis:
-            result_item["implicit_analysis"] = analysis
         results.append(result_item)
 
     # --- 保存结果 ---
-    # JSON：含完整信息（content, toxic, concept, likert_probs, implicit_analysis）
+    # JSON：含完整信息（content, toxic, concept, likert_probs）
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
     print(f"形容词概念向量(JSON)保存到: {output_path}")
@@ -506,17 +360,8 @@ def main():
     concept_dir = config.processed_path / args.dataset_name / args.model_name
     concept_dir.mkdir(parents=True, exist_ok=True)
 
-    # 两阶段模式下输出文件名加_two_stage后缀，对比模式加_contrastive后缀
-    suffix = "_two_stage" if args.use_two_stage else ""
-    if args.contrastive:
-        suffix += "_contrastive"
-    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}{suffix}.json"
-    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}{suffix}.csv"
-
-    # Stage 1缓存路径
-    stage1_cache_path = None
-    if args.use_two_stage:
-        stage1_cache_path = concept_dir / f"implicit_analysis_{args.mode}_{args.model_name}.json"
+    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.json"
+    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.csv"
 
     # 打印配置
     print("\n" + "=" * 60)
@@ -527,10 +372,6 @@ def main():
     print(f"当前模式: {args.mode}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"采样温度: {args.temperature}")
-    print(f"两阶段模式: {'是' if args.use_two_stage else '否'}")
-    print(f"对比提示模式: {'是' if args.contrastive else '否'}")
-    if args.use_two_stage:
-        print(f"Stage 1缓存路径: {stage1_cache_path}")
     print(f"数据集路径: {data_path}")
     print(f"JSON输出路径: {output_path}")
     print(f"CSV输出路径: {csv_output_path}")
@@ -555,8 +396,6 @@ def main():
         data_path, output_path, csv_output_path, adjective_path,
         args.temperature, tokenizer, llm_model,
         is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix, threshold=1e-4,
-        use_two_stage=args.use_two_stage, stage1_cache_path=stage1_cache_path,
-        contrastive=args.contrastive,
     )
 
     print("生成完成")
