@@ -15,6 +15,7 @@
 
 使用示例：
 python scripts/generate_adjective_c_r_vllm.py --mode train --dataset_name TOXICN --model_name Qwen2.5-7B-Instruct
+python scripts/generate_adjective_c_r_vllm.py --mode test --dataset_name TOXICN --model_name glm-4-9b-chat --adjective_name toxic_adjectives_v3.csv
 """
 
 import argparse
@@ -55,6 +56,8 @@ def parse_args():
                         help='train:生成训练集的概念向量，test:生成测试集的概念向量')
     parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称(TOXICN/COLD)')
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
+    parser.add_argument('--adjective_name', type=str, default=None,
+                        help='形容词词典文件名（如toxic_adjectives_v1.csv），默认使用MLP_config.py中的adjective_path')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.85,
                         help='vLLM GPU显存占用比例（0.0-1.0），默认0.85')
     return parser.parse_args()
@@ -355,11 +358,24 @@ def main():
 
     # 构建路径
     data_path = config.raw_data_path / args.dataset_name / f"{args.mode}.json"
+
+    # 形容词词典路径：命令行指定 > MLP_config.py默认值
+    if args.adjective_name is not None:
+        adjective_path = config.raw_data_path / "adjective" / args.adjective_name
+    else:
+        adjective_path = config.adjective_path
+    if not adjective_path.exists():
+        raise FileNotFoundError(f"形容词词典不存在: {adjective_path}")
+
+    # 从词典文件名提取词干用于输出文件命名（如 toxic_adjectives_v1.csv → v1）
+    adj_stem = adjective_path.stem  # toxic_adjectives_v1
+    adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
+
     concept_dir = config.processed_path / args.dataset_name / args.model_name
     concept_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.json"
-    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}.csv"
+    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_{adj_version}.json"
+    csv_output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_{adj_version}.csv"
 
     # 打印配置
     print("\n" + "=" * 60)
@@ -367,6 +383,7 @@ def main():
     print("=" * 60)
     print(f"数据集名称: {args.dataset_name}")
     print(f"LLM模型名称: {args.model_name}")
+    print(f"形容词词典: {adjective_path.name} ({adjective_path})")
     print(f"当前模式: {args.mode}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
     print(f"数据集路径: {data_path}")
@@ -388,7 +405,6 @@ def main():
         print(f"检测到模型({args.model_name})需要追加prompt后缀: {repr(prompt_suffix)}")
 
     # 执行概念向量生成
-    adjective_path = config.adjective_path
     generate_adj_concept(
         data_path, output_path, csv_output_path, adjective_path,
         tokenizer, llm_model,
