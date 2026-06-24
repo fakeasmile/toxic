@@ -16,7 +16,7 @@ class MLP(nn.Module):
         self.fc2 = nn.Linear(hidden_features, 2)
         self.relu = nn.ReLU()
 
-    def forward(self, feature_vector):
+    def forward(self, feature_vector, return_gate=False):
         inputs = feature_vector
 
         # 门控
@@ -31,4 +31,7 @@ class MLP(nn.Module):
         x = self.relu(x)
         x = self.dropout(x)
         x = self.fc2(x)
+
+        if return_gate:
+            return x, gate_weights
         return x

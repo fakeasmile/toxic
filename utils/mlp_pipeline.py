@@ -109,8 +109,11 @@ def update_MLPConfig(args):
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
 
-    # 构建文件名后缀：binary加_binary
-    suffix = ""
+    # 构建文件名后缀：形容词词典版本 + binary类型
+    # 从词典文件名提取版本（如 toxic_adjectives_v1.csv → v1），与generate脚本命名规则一致
+    adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
+    adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
+    suffix = f"_{adj_version}"
     if concept_type == 'binary':
         suffix += '_binary'
 
@@ -372,6 +375,18 @@ def evaluate(config, timestamp):
     with open(saved_config.test_concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
     contents = [item["content"] for item in raw_concept_data]
+    concept_vectors = [item["concept"] for item in raw_concept_data]
+
+    # 加载形容词词典（用于概念维度命名）
+    import csv
+    adjective_names = []
+    adjective_chinese = []
+    with open(saved_config.adjective_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        for row in reader:
+            adjective_names.append(row[0])
+            adjective_chinese.append(row[1] if len(row) > 1 else row[0])
 
     # 加载最佳模型
     model = MLP(
@@ -382,15 +397,18 @@ def evaluate(config, timestamp):
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
 
-    # 推理
-    all_preds, all_labels = [], []
+    # 推理（同时提取门控值和概率）
+    all_preds, all_labels, all_probs, all_gates = [], [], [], []
     with torch.no_grad():
         for batch_x, batch_y in test_loader:
             batch_x = batch_x.to(device)
-            outputs = model(batch_x)
+            outputs, gate_weights = model(batch_x, return_gate=True)
+            probs = torch.softmax(outputs, dim=1)
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.numpy())
+            all_probs.extend(probs.cpu().numpy())
+            all_gates.extend(gate_weights.cpu().numpy())
 
     # 计算指标
     f1 = f1_score(all_labels, all_preds, average='macro')
@@ -433,10 +451,16 @@ def evaluate(config, timestamp):
         f.write(report)
         f.write("\n" + "=" * 30 + "\n")
 
-    # 保存逐条预测结果 JSON
+    # 保存逐条预测结果 JSON（含概念向量、概率、门控值，用于错误分析）
     label_names = ["Non-Toxic", "Toxic"]
     predictions = []
     for i in range(len(all_preds)):
+        # 构建概念-门控映射（仅保存非零门控，减少文件大小）
+        gate_dict = {}
+        for j, adj_name in enumerate(adjective_names):
+            if all_gates[i][j] > 0.01:  # 只保存门控值 > 0.01 的概念
+                gate_dict[f"{adj_name}({adjective_chinese[j]})"] = round(float(all_gates[i][j]), 4)
+
         predictions.append({
             "index": i,
             "content": contents[i],
@@ -444,7 +468,13 @@ def evaluate(config, timestamp):
             "true_label_name": label_names[int(all_labels[i])],
             "pred_label": int(all_preds[i]),
             "pred_label_name": label_names[int(all_preds[i])],
-            "correct": bool(all_preds[i] == all_labels[i])
+            "correct": bool(all_preds[i] == all_labels[i]),
+            "probabilities": {
+                "non_toxic": round(float(all_probs[i][0]), 4),
+                "toxic": round(float(all_probs[i][1]), 4)
+            },
+            "concept_vector": [round(float(v), 4) for v in concept_vectors[i]],
+            "gate_values": gate_dict
         })
     with open(test_results_dir / "predictions.json", "w", encoding="utf-8") as f:
         json.dump(predictions, f, indent=2, ensure_ascii=False)
