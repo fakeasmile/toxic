@@ -175,14 +175,13 @@ def get_first_token_ids(word_list, tokenizer):
 
 
 # system instruction（与generate_adjective_c_r_vllm.py一致）
-# 方案B（Pragmatic Intent Scoring）：评估"实施意图"而非"相关程度"
+# 方案B修正版（Pragmatic Intent Scoring）：用"表达"替代"实施"，覆盖明示+暗示
 SYSTEM_INSTRUCTION = (
     "你是一位语用分析专家，擅长识别文本中作者的真实意图。\n"
     "在评估时，请进行语用推理：综合考虑文本的字面意思、比喻、谐音、反讽、文化暗示等隐含语义，\n"
-    "并区分作者是在\"讨论、引用或反对\"相关话题，还是在\"实施\"该形容词所代表的行为。\n"
-    "请用1到5的数字评估作者实施该行为的意图强度，"
-    "1表示作者完全没有实施意图（仅讨论、引用或反对相关话题），"
-    "5表示作者明确实施了该行为。只回答一个数字。"
+    "判断作者在多大程度上以该形容词所描述的方式表达其态度或意图。\n"
+    "请用1到5的数字评估，1表示作者完全没有该意图（仅客观陈述、引用或反对相关话题），"
+    "5表示作者明确以该形容词所描述的方式表达其态度。只回答一个数字。"
 )
 
 
@@ -195,7 +194,7 @@ def build_chat_messages(content, adj, adj_definition=None):
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"作者在文本中\"实施\"{adj}这一行为的意图强度如何？仅客观陈述、举例引用、反对批判时应给低分。回答： ")
+    user_lines.append(f"作者在文本中以\"{adj}\"所描述的方式表达其态度的程度如何？回答： ")
     user_content = "\n".join(user_lines)
 
     messages = [
