@@ -1,7 +1,9 @@
 """生成形容词概念向量（Chat Template + vLLM）
 
 核心思路：利用LLM的verbalizer token技术，提取首token概率分布，
-量化文本与各形容词之间的相关程度，构建可解释的概念向量。
+基于语用推理量化作者"实施"各形容词所代表行为的意图强度，构建可解释的概念向量。
+方案B（Pragmatic Intent Scoring）：区分"讨论/引用/反对"与"实施"，
+解决长文本误检和伪装型毒性漏检问题。
 
 【Verbalizer提取流程】
 1. 构建Chat Template prompt → LLM推理（max_tokens=1, temperature=0）
@@ -173,12 +175,16 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
 # =============================================================================
 # 提示词定义
 # =============================================================================
-# system instruction：提示LLM考虑隐含意思
+# system instruction：引导LLM进行语用推理，评估"实施意图"而非"相关程度"
+# 方案B（Pragmatic Intent Scoring）：基于PIC的Relevance Theory，
+# 区分"讨论/引用/反对"与"实施"，解决长文本误检和伪装型毒性漏检问题
 SYSTEM_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
-    "判断文本是否体现了该形容词所描述的特征。\n"
-    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+    "你是一位语用分析专家，擅长识别文本中作者的真实意图。\n"
+    "在评估时，请进行语用推理：综合考虑文本的字面意思、比喻、谐音、反讽、文化暗示等隐含语义，\n"
+    "并区分作者是在\"讨论、引用或反对\"相关话题，还是在\"实施\"该形容词所代表的行为。\n"
+    "请用1到5的数字评估作者实施该行为的意图强度，"
+    "1表示作者完全没有实施意图（仅讨论、引用或反对相关话题），"
+    "5表示作者明确实施了该行为。只回答一个数字。"
 )
 
 
@@ -192,13 +198,13 @@ def build_chat_messages(content, adj, adj_definition=None):
         文本内容：{content}
         形容词：{adj}
         定义：{adj_definition}  ← 仅当定义存在时插入
-        该文本在多大程度上体现了"{adj}"所描述的特征？回答：
+        作者在文本中"实施"{adj}这一行为的意图强度如何？仅客观陈述、举例引用、反对批判时应给低分。回答：
     """
     user_lines = [f"文本内容：{content}"]
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    user_lines.append(f"作者在文本中\"实施\"{adj}这一行为的意图强度如何？仅客观陈述、举例引用、反对批判时应给低分。回答： ")
     user_content = "\n".join(user_lines)
 
     return [
