@@ -1,8 +1,8 @@
-"""Qwen模型提示词模板调试工具（单样本切片分析，vLLM版本）
+"""意图概念向量提示词模板调试工具（单样本切片分析，vLLM版本）
 
 【定位】
-本脚本是 generate_adjective_c_r_vllm.py 的"单样本切片"调试工具。
-generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
+本脚本是 generate_adjective_intent_vllm.py 的"单样本切片"调试工具。
+generate_adjective_intent_vllm.py 负责为数据集中所有文本、所有形容词批量生成意图概念向量；
 而本脚本只抽取"一个文本 + 一个形容词"进行单步推理，用于在批量生成前快速验证
 提示词模板和 Verbalizer 词表的设计是否合理。
 
@@ -11,20 +11,18 @@ generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容�
    观察模型在第一个输出位置的概率分布。如果 Top-10 中大部分是 verbalizer 词表中的词，
    说明提示词模板成功将模型输出约束到预期方向。
 2. 模型实际生成序列（贪心解码，10个token）
-   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答1-5数字）。
+   观察模型实际输出的文本是否通顺、是否符合模板要求（如是否直接回答1-3数字）。
 3. Verbalizer 概率分析
    统计预定义 verbalizer 词表中所有词的概率总和，评估约束强度。
    - 理想情况下，该总和应占模型首 token 概率质量的 70%~90% 以上。
    - 若过低（如 < 0.5），说明模型大量概率分散到非预期词，提示词模板或 verbalizer 词表需改进。
 
-【与 generate_adjective_c_r_vllm.py 的关系】
-- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 generate_adjective_c_r_vllm.py 完全一致。
-- 通过本脚本调试确认模板和 verbalizer 合理后，再运行 generate_adjective_c_r_vllm.py 进行批量生成，
-  可确保生成的概念向量质量。
+【与 generate_adjective_intent_vllm.py 的关系】
+- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 generate_adjective_intent_vllm.py 完全一致。
 
 【使用方法】
-直接修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容、形容词、形容词定义等），然后运行：
-python scripts/inspect_prompt_template_vllm.py
+直接修改下方 CONFIG 区域的变量（模型名、文本内容、形容词等），然后运行：
+python scripts/inspect_prompt_template_intent_vllm.py
 """
 import math
 import os
@@ -49,18 +47,18 @@ from configs.MLP_config import MLPConfig
 
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-7B-Instruct"  # models目录下的模型文件夹名
+MODEL_NAME = "glm-4-9b-chat"  # models目录下的模型文件夹名
 
 # 文本内容和形容词（直接修改即可）
 TEXT_CONTENT = "什么被害妄想猎巫man"
-ADJECTIVE = "包容的"
+ADJECTIVE = "嘲讽的"
 
 # vLLM推理配置
 GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
 # ===================================================================
 
 
-# 模型加载配置表（与 generate_adjective_c_r_vllm.py 保持一致）
+# 模型加载配置表（与 generate_adjective_intent_vllm.py 保持一致）
 MODEL_LOADING_CONFIG = {
     "Qwen2.5-7B-Instruct": {
         "quantization": None,
@@ -112,11 +110,7 @@ def get_model_loading_config(model_name: str) -> dict:
 
 
 def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85):
-    """加载vLLM模型和tokenizer（复用generate_adjective_c_r_vllm逻辑）
-
-    所有模型差异（量化方式、多模态处理、Qwen3+ 标志）均从
-    MODEL_LOADING_CONFIG 中读取，保证新增模型时只需改配置表。
-    """
+    """加载vLLM模型和tokenizer（复用generate_adjective_intent_vllm逻辑）"""
     llm_path = model_path / model_name
     if not llm_path.exists():
         raise ValueError(f"LLM path {llm_path} does not exist")
@@ -139,7 +133,7 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         trust_remote_code=True,
         dtype="auto",
         gpu_memory_utilization=gpu_memory_utilization,
-        enable_prefix_caching=True,    # 启用前缀缓存，加速system指令复用
+        enable_prefix_caching=True,
         max_model_len=1024,
         max_num_seqs=64,
         max_num_batched_tokens=16384,
@@ -147,14 +141,13 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     if quantization is not None:
         llm_kwargs["quantization"] = quantization
 
-    # 多模态模型：纯文本推理时跳过视觉编码器，释放显存
     if is_multimodal:
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         llm_kwargs["language_model_only"] = True
         print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt + language_model_only")
 
     print(f"Loading vLLM model from {llm_path}")
-    print(f"  量化方式: {quantization if quantization else '无量化'}")
+    print(f" 量化方式: {quantization if quantization else '无量化'}")
     llm = LLM(**llm_kwargs)
 
     return tokenizer, llm, model_config["is_qwen3"]
@@ -174,25 +167,26 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-# system instruction（与generate_adjective_c_r_vllm.py一致）
+# system instruction（与generate_adjective_intent_vllm.py一致）
 SYSTEM_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
-    "判断文本是否体现了该形容词所描述的特征。\n"
-    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+    "你是一位语用分析专家，擅长识别文本中作者的真实意图。\n"
+    "请综合考虑文本的字面意思和隐含语义（比喻、谐音、反讽、文化隐喻等），"
+    "判断作者在文本中是否以该形容词所描述的方式表达其态度。\n"
+    "用1到3的数字回答，1表示作者仅在讨论、引用、反对或客观陈述相关话题"
+    "而未以该方式表达态度，2表示难以明确判断，"
+    "3表示作者以该形容词所描述的方式表达其态度，包括以隐含、暗示或反讽等方式。只回答一个数字。"
 )
 
 
 def build_chat_messages(content, adj, adj_definition=None):
-    """
-    构建Likert Chat Template的messages列表。
-    逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
+    """构建意图判断的Chat Template messages。
+    逻辑与 generate_adjective_intent_vllm.py 中的模板构建保持一致。
     """
     user_lines = [f"文本内容：{content}"]
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    user_lines.append(f"作者是否以\"{adj}\"所描述的方式表达其态度？回答： ")
     user_content = "\n".join(user_lines)
 
     messages = [
@@ -219,8 +213,8 @@ def main():
     # 构建Chat Template messages
     messages = build_chat_messages(TEXT_CONTENT, ADJECTIVE, adj_definition)
 
-    # verbalizer词表（与generate_adjective_c_r_vllm.py一致）
-    verbalizer_words = ["1", "2", "3", "4", "5"]
+    # verbalizer词表（与generate_adjective_intent_vllm.py一致，3级）
+    verbalizer_words = ["1", "2", "3"]
 
     # 生成完整prompt文本
     chat_template_kwargs = {"enable_thinking": False} if qwen3_flag else {}
@@ -236,7 +230,7 @@ def main():
     prompt += prompt_suffix
 
     print("\n" + "=" * 60)
-    print("模型推理调试（vLLM版本）")
+    print("意图概念向量 - 模型推理调试（vLLM版本）")
     print("=" * 60)
     print(f"模型: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
@@ -247,7 +241,7 @@ def main():
 
     print(f"\n提示词token数: {len(tokenizer.encode(prompt))}")
 
-    # vLLM采样配置：获取logprobs用于分析首token分布，同时生成少量token观察输出
+    # vLLM采样配置：获取logprobs用于分析首token分布
     sampling_params_analysis = SamplingParams(
         max_tokens=1,
         temperature=0,
@@ -260,14 +254,12 @@ def main():
 
     # 提取首token的logprobs分布
     logprobs = output.outputs[0].logprobs
-    first_token_logprobs = logprobs[0]  # {token_id: Logprob对象}
+    first_token_logprobs = logprobs[0]
 
     # 转换为概率字典
     probs_dict = {}
     for token_id, logprob_obj in first_token_logprobs.items():
         probs_dict[token_id] = math.exp(logprob_obj.logprob)
-
-    # 直接使用vLLM返回的原始概率，不手动应用temperature
 
     # 输出概率最高的前10个token
     topk = 10
@@ -314,26 +306,25 @@ def main():
         print(f"\nVerbalizer概率总和: {total_vprob:.6f}")
         print(f"Verbalizer占总概率比例: {total_vprob:.2%}")
 
-        # 分数计算（与generate_adjective_c_r_vllm.py保持一致）
+        # 分数计算（与generate_adjective_intent_vllm.py保持一致，3级）
         print(f"\n{'=' * 60}")
-        print("概念向量分数计算")
+        print("意图概念向量分数计算（3级）")
         print(f"{'=' * 60}")
 
-        likert_ids = get_first_token_ids(score_tokens["likert"], tokenizer)
-        weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+        intent_ids = get_first_token_ids(verbalizer_words, tokenizer)
+        # 3级权重：1=讨论(0.0), 2=模糊(0.5), 3=表达(1.0)
+        weights = torch.tensor([0.0, 0.5, 1.0])
 
-        level_probs_list = [probs_dict.get(tid, 0.0) for tid in likert_ids]
+        level_probs_list = [probs_dict.get(tid, 0.0) for tid in intent_ids]
         level_probs = torch.tensor(level_probs_list)
         total_level_prob = level_probs.sum() + 1e-8
         score = (weights * level_probs / total_level_prob).sum().item()
 
-        print(f"Level 1 (权重0.00): {level_probs_list[0]:.6f}")
-        print(f"Level 2 (权重0.25): {level_probs_list[1]:.6f}")
-        print(f"Level 3 (权重0.50): {level_probs_list[2]:.6f}")
-        print(f"Level 4 (权重0.75): {level_probs_list[3]:.6f}")
-        print(f"Level 5 (权重1.00): {level_probs_list[4]:.6f}")
-        print(f"Likert概率总和: {total_level_prob.item():.6f}")
-        print(f"加权期望概念分数: {score:.6f}")
+        print(f"Level 1 (讨论/引用/反对, 权重0.00): {level_probs_list[0]:.6f}")
+        print(f"Level 2 (模糊,           权重0.50): {level_probs_list[1]:.6f}")
+        print(f"Level 3 (表达,           权重1.00): {level_probs_list[2]:.6f}")
+        print(f"意图概率总和: {total_level_prob.item():.6f}")
+        print(f"加权期望意图分数: {score:.6f}")
 
     print("=" * 60)
 

@@ -1,29 +1,25 @@
-"""Verbalizer覆盖率全景分析工具（全形容词扫描，vLLM版本）
+"""意图概念向量 Verbalizer覆盖率全景分析工具（全形容词扫描，vLLM版本）
 
 【定位】
-本脚本是 generate_adjective_c_r_vllm.py 的"全形容词切片"评估工具。
-generate_adjective_c_r_vllm.py 负责为数据集中所有文本、所有形容词批量生成概念向量；
-inspect_prompt_template_vllm.py 负责在单样本级别（一个文本 + 一个形容词）调试提示词和 verbalizer；
+本脚本是 generate_adjective_intent_vllm.py 的"全形容词切片"评估工具。
+generate_adjective_intent_vllm.py 负责为数据集中所有文本、所有形容词批量生成意图概念向量；
+inspect_prompt_template_intent_vllm.py 负责在单样本级别（一个文本 + 一个形容词）调试提示词和 verbalizer；
 而本脚本则对"一条固定文本 + 全部形容词"进行扫描，评估该提示词模板和 verbalizer 词表在整个形容词词典上的覆盖能力是否稳定。
 
 【核心功能】
 对单条文本遍历所有形容词，使用 vLLM 推理并提取 verbalizer token 的概率总和。
 
-【与 generate_adjective_c_r_vllm.py / inspect_prompt_template_vllm.py 的关系】
-- 本脚本的提示词构建逻辑、verbalizer 词表、分数计算逻辑与 
-  generate_adjective_c_r_vllm.py 完全一致。
-- inspect_prompt_template_vllm.py 用于"点"级别的单样本调试（快速迭代提示词和 verbalizer）；
-- 本脚本用于"面"级别的全景验证（确认改进后的模板和 verbalizer 在整个形容词词典上表现稳定）；
-- 两者结合，确保 generate_adjective_c_r_vllm.py 批量生成的概念向量质量可靠。
+【与 generate_adjective_intent_vllm.py 的关系】
+- 本脚本的提示词构建逻辑、verbalizer 词表（"1"~"3"）、分数计算逻辑与
+  generate_adjective_intent_vllm.py 完全一致。
 
 【输出】
 1. 可视化图表（PNG）：横轴为形容词索引，纵轴为概率值
-   - 一条线（total_prob 蓝色）+ 均值参考线
-2. JSON 数据文件：每个形容词的详细概率数据 + 统计摘要（均值 / 最小值 / 最大值）
+2. JSON 数据文件：每个形容词的详细概率数据 + 统计摘要
 
 【使用方法】
-1. 修改下方 CONFIG 区域的变量（模型名、模板类型、文本内容等）
-2. 运行：python scripts/inspect_verbalizer_coverage_vllm.py
+1. 修改下方 CONFIG 区域的变量（模型名、文本内容等）
+2. 运行：python scripts/inspect_verbalizer_coverage_intent_vllm.py
 """
 import json
 import math
@@ -34,7 +30,6 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
-import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -55,9 +50,7 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 # ==================== CONFIG 区域（直接修改以下变量）====================
-MODEL_NAME = "Qwen2.5-7B-Instruct"  # models目录下的模型文件夹名（可选：Qwen2.5-7B-Instruct / Qwen3.5-9B / glm-4-9b-chat）
-
-
+MODEL_NAME = "glm-4-9b-chat"  # models目录下的模型文件夹名
 
 # 文本内容（直接修改即可）
 TEXT_CONTENT = "什么被害妄想猎巫man"
@@ -70,7 +63,7 @@ GPU_MEMORY_UTILIZATION = 0.85  # GPU显存占用比例（0.0-1.0）
 # ===================================================================
 
 
-# 模型加载配置表（与 generate_adjective_c_r_vllm.py 保持一致）
+# 模型加载配置表（与 generate_adjective_intent_vllm.py 保持一致）
 MODEL_LOADING_CONFIG = {
     "Qwen2.5-7B-Instruct": {
         "quantization": None,
@@ -122,11 +115,7 @@ def get_model_loading_config(model_name: str) -> dict:
 
 
 def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85):
-    """加载vLLM模型和tokenizer（复用generate_adjective_c_r_vllm逻辑）
-
-    所有模型差异（量化方式、多模态处理、Qwen3+ 标志）均从
-    MODEL_LOADING_CONFIG 中读取，保证新增模型时只需改配置表。
-    """
+    """加载vLLM模型和tokenizer（复用generate_adjective_intent_vllm逻辑）"""
     llm_path = model_path / model_name
     if not llm_path.exists():
         raise ValueError(f"LLM path {llm_path} does not exist")
@@ -149,7 +138,7 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
         trust_remote_code=True,
         dtype="auto",
         gpu_memory_utilization=gpu_memory_utilization,
-        enable_prefix_caching=True,    # 启用前缀缓存，加速system指令复用
+        enable_prefix_caching=True,
         max_model_len=1024,
         max_num_seqs=64,
         max_num_batched_tokens=16384,
@@ -157,14 +146,13 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
     if quantization is not None:
         llm_kwargs["quantization"] = quantization
 
-    # 多模态模型：纯文本推理时跳过视觉编码器，释放显存
     if is_multimodal:
         llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         llm_kwargs["language_model_only"] = True
         print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt + language_model_only")
 
     print(f"Loading vLLM model from {llm_path}")
-    print(f"  量化方式: {quantization if quantization else '无量化'}")
+    print(f" 量化方式: {quantization if quantization else '无量化'}")
     llm = LLM(**llm_kwargs)
 
     return tokenizer, llm, model_config["is_qwen3"]
@@ -184,25 +172,26 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-# system instruction（与generate_adjective_c_r_vllm.py一致）
+# system instruction（与generate_adjective_intent_vllm.py一致）
 SYSTEM_INSTRUCTION = (
-    "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
-    "在评估时，请综合考虑文本的字面意思和可能的隐含意思（如比喻、谐音、反讽、文化隐喻等），\n"
-    "判断文本是否体现了该形容词所描述的特征。\n"
-    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+    "你是一位语用分析专家，擅长识别文本中作者的真实意图。\n"
+    "请综合考虑文本的字面意思和隐含语义（比喻、谐音、反讽、文化隐喻等），"
+    "判断作者在文本中是否以该形容词所描述的方式表达其态度。\n"
+    "用1到3的数字回答，1表示作者仅在讨论、引用、反对或客观陈述相关话题"
+    "而未以该方式表达态度，2表示难以明确判断，"
+    "3表示作者以该形容词所描述的方式表达其态度，包括以隐含、暗示或反讽等方式。只回答一个数字。"
 )
 
 
 def build_chat_messages(content, adj, adj_definition=None):
-    """
-    构建Likert Chat Template的messages列表。
-    逻辑与 generate_adjective_c_r_vllm.py 中的模板构建保持一致。
+    """构建意图判断的Chat Template messages。
+    逻辑与 generate_adjective_intent_vllm.py 中的模板构建保持一致。
     """
     user_lines = [f"文本内容：{content}"]
     user_lines.append(f"形容词：{adj}")
     if adj_definition:
         user_lines.append(f"定义：{adj_definition}")
-    user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
+    user_lines.append(f"作者是否以\"{adj}\"所描述的方式表达其态度？回答： ")
     user_content = "\n".join(user_lines)
 
     messages = [
@@ -221,14 +210,15 @@ def analyze_verbalizer_coverage(
     model_name: str,
     is_qwen3=False,
     prompt_suffix="",
-    template="likert",
+    template="intent",
 ):
+    """对单条文本遍历所有形容词，使用 vLLM 计算 verbalizer 概率总和并可视化。
+
+    3级意图verbalizer：1=讨论/引用/反对, 2=模糊, 3=表达
     """
-    对单条文本遍历所有形容词，使用 vLLM 计算 verbalizer 概率总和并可视化。
-    """
-    # 定义Likert verbalizer token
-    likert_tokens = ["1", "2", "3", "4", "5"]
-    likert_ids = get_first_token_ids(likert_tokens, tokenizer)
+    # 意图verbalizer token（3级）
+    intent_tokens = ["1", "2", "3"]
+    intent_ids = get_first_token_ids(intent_tokens, tokenizer)
 
     # 加载形容词词典（含定义）
     adj_df = pd.read_csv(adjective_path)
@@ -258,11 +248,10 @@ def analyze_verbalizer_coverage(
             add_generation_prompt=True,
             **chat_template_kwargs
         )
-        # 追加模型特定的后缀
         prompt_text += prompt_suffix
         prompts.append(prompt_text)
 
-    # 批量推理（vLLM自动处理批量化）
+    # 批量推理
     outputs = llm_model.generate(prompts, sampling_params, use_tqdm=False)
 
     for adj_idx, sample_info in enumerate(tqdm(outputs, desc="Processing adjectives")):
@@ -275,17 +264,16 @@ def analyze_verbalizer_coverage(
         for token_id, logprob_obj in first_token_logprobs.items():
             probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
-        # 直接使用vLLM返回的原始概率，不手动应用temperature
-
-        level_probs = [probs_dict.get(tid, 0.0) for tid in likert_ids]
+        # 提取3级意图概率
+        level_probs = [probs_dict.get(tid, 0.0) for tid in intent_ids]
         total_prob = sum(level_probs)
-        # 计算概率最高的数字分数（1-5映射到0.0-1.0）
+        # 概率最高数字映射到分数（3级：0, 0.5, 1.0）
         max_level_idx = level_probs.index(max(level_probs))
-        max_level_score = max_level_idx / 4.0  # 0, 0.25, 0.5, 0.75, 1.0
-        # 计算加权期望likert分数（与generate_adjective_c_r_vllm.py一致）
-        weights = [0.0, 0.25, 0.5, 0.75, 1.0]
+        max_level_score = max_level_idx / 2.0  # 0, 0.5, 1.0
+        # 加权期望意图分数（与generate_adjective_intent_vllm.py一致）
+        weights = [0.0, 0.5, 1.0]
         total_prob_eps = total_prob + 1e-8
-        likert_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob_eps
+        intent_score = sum(w * p for w, p in zip(weights, level_probs)) / total_prob_eps
         results.append({
             "index": adj_idx,
             "adjective_en": adj_en_list[adj_idx],
@@ -293,11 +281,9 @@ def analyze_verbalizer_coverage(
             "level_1_prob": round(level_probs[0], 6),
             "level_2_prob": round(level_probs[1], 6),
             "level_3_prob": round(level_probs[2], 6),
-            "level_4_prob": round(level_probs[3], 6),
-            "level_5_prob": round(level_probs[4], 6),
             "total_prob": round(total_prob, 6),
             "max_level_score": round(max_level_score, 6),
-            "likert_score": round(likert_score, 6),
+            "intent_score": round(intent_score, 6),
         })
 
     # 保存JSON数据
@@ -325,10 +311,10 @@ def analyze_verbalizer_coverage(
 
     total_probs = [r["total_prob"] for r in results]
     max_level_scores = [r["max_level_score"] for r in results]
-    likert_scores = [r["likert_score"] for r in results]
-    ax.plot(x, total_probs, label="total_prob (Likert verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
+    intent_scores = [r["intent_score"] for r in results]
+    ax.plot(x, total_probs, label="total_prob (意图verbalizer总概率)", color="blue", alpha=0.9, linewidth=1.2)
     ax.plot(x, max_level_scores, label="max_level_score (概率最高数字分数)", color="orange", alpha=0.8, linewidth=1.0, linestyle="--")
-    ax.plot(x, likert_scores, label="likert_score (加权期望分数)", color="green", alpha=0.8, linewidth=1.0, linestyle="-.")
+    ax.plot(x, intent_scores, label="intent_score (加权期望分数)", color="green", alpha=0.8, linewidth=1.0, linestyle="-.")
 
     mean_total = sum(total_probs) / len(total_probs)
     ax.axhline(y=mean_total, color="blue", linestyle="--", alpha=0.5, label=f"total均值: {mean_total:.3f}")
@@ -336,7 +322,7 @@ def analyze_verbalizer_coverage(
     ax.set_xlabel("形容词索引", fontsize=12)
     ax.set_ylabel("概率", fontsize=12)
     ax.set_title(
-        f"Verbalizer覆盖率分析（vLLM）\n模型: {model_name} | 模板: likert | 文本: {text_content[:30]}...",
+        f"意图Verbalizer覆盖率分析（vLLM）\n模型: {model_name} | 模板: intent | 文本: {text_content[:30]}...",
         fontsize=14,
     )
     ax.legend(loc="upper right", fontsize=10)
@@ -344,7 +330,7 @@ def analyze_verbalizer_coverage(
     ax.set_ylim(0, 1.05)
     ax.grid(True, alpha=0.3)
 
-    # 在底部添加形容词名称（稀疏显示，避免重叠）
+    # 在底部添加形容词名称
     tick_step = max(1, len(adjectives) // 20)
     tick_positions = list(range(0, len(adjectives), tick_step))
     tick_labels = [adjectives[i] if i < len(adjectives) else "" for i in tick_positions]
@@ -359,7 +345,7 @@ def analyze_verbalizer_coverage(
 
     # 打印统计摘要
     print("\n" + "=" * 60)
-    print("Verbalizer覆盖率统计摘要")
+    print("意图Verbalizer覆盖率统计摘要")
     print("=" * 60)
     print(f"模板类型: {template}")
     print(f"形容词数量: {len(adjectives)}")
@@ -376,7 +362,7 @@ def main():
     output_dir = config.base_path / OUTPUT_DIR
 
     print("\n" + "=" * 60)
-    print("Verbalizer覆盖率分析（vLLM版本）")
+    print("意图概念向量 Verbalizer覆盖率分析（vLLM版本）")
     print("=" * 60)
     print(f"模型名称: {MODEL_NAME}")
     print(f"文本内容: {TEXT_CONTENT}")
@@ -401,7 +387,7 @@ def main():
         model_name=MODEL_NAME,
         is_qwen3=qwen3_flag,
         prompt_suffix=prompt_suffix,
-        template="likert",
+        template="intent",
     )
 
 
