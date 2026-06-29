@@ -42,6 +42,7 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -93,7 +94,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
 
     # 概念向量类型
-    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (Likert评分) 或 binary (是否评分)')
+    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary', 'intent', 'dual', 'dual_interact'], help='概念向量类型: likert (相关度), binary (是否评分), intent (意图信号), dual (双信号拼接, 354维), dual_interact (双信号+差异+交互特征, 708维)')
 
     return parser.parse_args()
 
@@ -109,19 +110,34 @@ def update_MLPConfig(args):
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
 
-    # 构建文件名后缀：形容词词典版本 + binary类型
+    # 构建文件名后缀：形容词词典版本 + concept_type后缀
     # 从词典文件名提取版本（如 toxic_adjectives_v1.csv → v1），与generate脚本命名规则一致
     adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
     adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
     suffix = f"_{adj_version}"
     if concept_type == 'binary':
         suffix += '_binary'
+    elif concept_type == 'intent':
+        suffix += '_intent'
+
+    # dual/dual_interact模式：主路径为likert，辅助路径为intent
+    # 主路径(train_concept_path/test_concept_path)指向likert文件
+    # 辅助路径(train_concept_path_intent/test_concept_path_intent)指向intent文件
+    intent_suffix = f"_{adj_version}_intent"
 
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                      / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{suffix}.json")
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                     / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
 
+    # dual/dual_interact模式下额外保存intent路径
+    if concept_type in ('dual', 'dual_interact'):
+        mlp_config.train_concept_path_intent = (mlp_config.processed_path / mlp_config.dataset_name
+                                                / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{intent_suffix}.json")
+        mlp_config.test_concept_path_intent = (mlp_config.processed_path / mlp_config.dataset_name
+                                               / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{intent_suffix}.json")
+
+    mlp_config.concept_type = concept_type
     return mlp_config
 
 
@@ -129,9 +145,10 @@ def load_data(config, mode):
     """加载指定训练或测试的概念向量和标签。
 
     概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
+    dual模式下加载likert+intent两个文件并拼接为354维向量。
 
     Args:
-        config: 配置文件
+        config: 配置文件（含concept_type字段）
         mode: train/test，区分加载训练或实验数据集
 
     Returns:
@@ -145,7 +162,7 @@ def load_data(config, mode):
     else:
         raise ValueError("in load_data, mode must be 'train' or 'test'")
 
-    # 加载概念向量文件（已包含 content, toxic, concept 字段）
+    # 加载主概念向量文件（likert或intent或binary）
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
@@ -153,6 +170,32 @@ def load_data(config, mode):
     for item in raw_concept_data:
         concepts.append(item["concept"])
         labels.append(item["toxic"])
+
+    # dual/dual_interact模式：加载intent概念向量
+    concept_type = getattr(config, 'concept_type', 'likert')
+    if concept_type in ('dual', 'dual_interact'):
+        if mode == "train":
+            intent_path = config.train_concept_path_intent
+        else:
+            intent_path = config.test_concept_path_intent
+
+        with open(intent_path, "r", encoding="utf-8") as f:
+            intent_data = json.load(f)
+
+        if concept_type == 'dual':
+            # 简单拼接：[likert_177维, intent_177维] → 354维
+            for i, item in enumerate(intent_data):
+                concepts[i] = concepts[i] + item["concept"]
+        else:
+            # dual_interact: 差异特征显式编码
+            # [likert, intent, likert-intent, likert*intent] → 708维
+            # 显式提供差异信号（相关但不表达 vs 表达但不相关）和交互信号（既相关又表达）
+            for i, item in enumerate(intent_data):
+                likert_vec = np.array(concepts[i], dtype=np.float32)
+                intent_vec = np.array(item["concept"], dtype=np.float32)
+                diff_vec = likert_vec - intent_vec
+                interact_vec = likert_vec * intent_vec
+                concepts[i] = np.concatenate([likert_vec, intent_vec, diff_vec, interact_vec]).tolist()
 
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
@@ -377,6 +420,25 @@ def evaluate(config, timestamp):
     contents = [item["content"] for item in raw_concept_data]
     concept_vectors = [item["concept"] for item in raw_concept_data]
 
+    # dual/dual_interact模式：加载intent概念向量并构造特征
+    concept_type = getattr(saved_config, 'concept_type', 'likert')
+    if concept_type in ('dual', 'dual_interact'):
+        with open(saved_config.test_concept_path_intent, "r", encoding="utf-8") as f:
+            intent_concept_data = json.load(f)
+
+        if concept_type == 'dual':
+            # 简单拼接：354维
+            for i, item in enumerate(intent_concept_data):
+                concept_vectors[i] = concept_vectors[i] + item["concept"]
+        else:
+            # dual_interact: 差异特征显式编码，708维
+            for i, item in enumerate(intent_concept_data):
+                likert_vec = np.array(concept_vectors[i], dtype=np.float32)
+                intent_vec = np.array(item["concept"], dtype=np.float32)
+                diff_vec = likert_vec - intent_vec
+                interact_vec = likert_vec * intent_vec
+                concept_vectors[i] = np.concatenate([likert_vec, intent_vec, diff_vec, interact_vec]).tolist()
+
     # 加载形容词词典（用于概念维度命名）
     import csv
     adjective_names = []
@@ -511,6 +573,10 @@ def main():
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
             "concept_dim": config.train_concept_path.stem,  # 概念向量文件名（含维度信息）
+
+            # dual模式下额外保存intent路径（用于测试时加载双信号）
+            "train_concept_path_intent": str(getattr(config, 'train_concept_path_intent', '')),
+            "test_concept_path_intent": str(getattr(config, 'test_concept_path_intent', '')),
 
             # 随机种子
             "seed": config.seed,
