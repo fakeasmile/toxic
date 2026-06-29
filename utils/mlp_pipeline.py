@@ -94,7 +94,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
 
     # 概念向量类型
-    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary', 'intent', 'dual', 'dual_interact'], help='概念向量类型: likert (相关度), binary (是否评分), intent (意图信号), dual (双信号拼接, 354维), dual_interact (双信号+差异+交互特征, 708维)')
+    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary', 'intent', 'dual', 'dual_interact', 'pragmatic'], help='概念向量类型: likert (相关度), binary (是否评分), intent (意图信号), dual (双信号拼接, 354维), dual_interact (双信号+差异+交互特征, 708维), pragmatic (语用轴, 8维设计正交)')
 
     return parser.parse_args()
 
@@ -114,11 +114,15 @@ def update_MLPConfig(args):
     # 从词典文件名提取版本（如 toxic_adjectives_v1.csv → v1），与generate脚本命名规则一致
     adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
     adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
-    suffix = f"_{adj_version}"
-    if concept_type == 'binary':
-        suffix += '_binary'
-    elif concept_type == 'intent':
-        suffix += '_intent'
+    if concept_type == 'pragmatic':
+        # 语用轴概念向量：文件名后缀为_pragmatic，不依赖形容词词典版本
+        suffix = '_pragmatic'
+    else:
+        suffix = f"_{adj_version}"
+        if concept_type == 'binary':
+            suffix += '_binary'
+        elif concept_type == 'intent':
+            suffix += '_intent'
 
     # dual/dual_interact模式：主路径为likert，辅助路径为intent
     # 主路径(train_concept_path/test_concept_path)指向likert文件
@@ -439,16 +443,26 @@ def evaluate(config, timestamp):
                 interact_vec = likert_vec * intent_vec
                 concept_vectors[i] = np.concatenate([likert_vec, intent_vec, diff_vec, interact_vec]).tolist()
 
-    # 加载形容词词典（用于概念维度命名）
+    # 加载概念维度命名（用于结果可解释性）
     import csv
     adjective_names = []
     adjective_chinese = []
-    with open(saved_config.adjective_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        for row in reader:
-            adjective_names.append(row[0])
-            adjective_chinese.append(row[1] if len(row) > 1 else row[0])
+    if concept_type == 'pragmatic':
+        # 语用轴：从pragmatic_axes.csv加载轴名
+        axes_path = Path(saved_config.adjective_path).parent / "pragmatic_axes.csv"
+        with open(axes_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader)
+            for row in reader:
+                adjective_names.append(row[0])  # axis_name
+                adjective_chinese.append(row[1] if len(row) > 1 else row[0])  # axis_chinese
+    else:
+        with open(saved_config.adjective_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            for row in reader:
+                adjective_names.append(row[0])
+                adjective_chinese.append(row[1] if len(row) > 1 else row[0])
 
     # 加载最佳模型
     model = MLP(
