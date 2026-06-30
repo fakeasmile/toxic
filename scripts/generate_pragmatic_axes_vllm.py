@@ -11,8 +11,13 @@
 【Verbalizer提取流程】
 1. 构建Chat Template prompt → LLM推理（max_tokens=1, temperature=0）
 2. 提取首token的Top-20 logprobs → exp()转为概率
-3. 从概率分布中提取verbalizer token（"1"~"5"）的概率
-4. 加权期望：score = Σ(weight_k × P(k)) / Σ(P(k))，weights=[0, 0.25, 0.5, 0.75, 1.0]
+3. 从概率分布中提取verbalizer token（"1"~"3"）的概率
+4. 加权期望：score = Σ(weight_k × P(k)) / Σ(P(k))，weights=[0.0, 0.5, 1.0]
+
+【3级verbalizer + 锚点对比设计】
+- 3级verbalizer（1/2/3）替代5级（1~5），减少中间分hedging倾向
+- 锚点对比（相比普通对话文本）提供明确参照基准，强制LLM给出明确判断
+- 解决5级verbalizer下6/8轴argmax=3比例超过67%的hedging问题
 
 使用示例：
 python scripts/generate_pragmatic_axes_vllm.py --mode train --dataset_name TOXICN --model_name glm-4-9b-chat
@@ -174,12 +179,16 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
 # =============================================================================
 # 提示词定义
 # =============================================================================
-# system instruction：语用分析，强调从正交维度分析表达方式而非内容本身
-# 不在system中指定具体等级含义，因为每个语用轴的1-5含义不同，放在user content中
+# system instruction：语用分析，3级verbalizer + 锚点对比
+# 3级verbalizer减少中间分hedging倾向；锚点对比（普通对话文本）提供明确参照基准
 SYSTEM_INSTRUCTION = (
     "你是一位语用分析专家，擅长从多个正交维度分析文本的表达方式。\n"
     "在评估时，请综合考虑文本的字面意思和可能的隐含语义（如比喻、谐音、反讽、文化隐喻等）。\n"
-    "请用1到5的数字评估，只回答一个数字。"
+    "请以普通对话文本作为参照基准，用1到3的数字评估：\n"
+    "1=低于普通文本（基本不涉及此维度）\n"
+    "2=与普通文本相当（有一定涉及）\n"
+    "3=高于普通文本（强烈体现此维度）\n"
+    "只回答一个数字。"
 )
 
 
@@ -189,12 +198,16 @@ SYSTEM_INSTRUCTION = (
 def build_chat_messages(content, axis_chinese, definition=None, scale_description=None):
     """构建语用轴评分的Chat Template messages。
 
+    采用3级verbalizer + 锚点对比设计：
+    - 3级verbalizer（1/2/3）减少中间分hedging倾向
+    - 锚点对比（相比普通对话文本）提供明确参照基准，强制LLM给出明确判断
+
     user_content结构：
         文本内容：{content}
         分析维度：{axis_chinese}
         定义：{definition}              ← 仅当定义存在时插入
         评分标准：{scale_description}    ← 仅当评分标准存在时插入
-        该文本在"{axis_chinese}"维度上的评分是？回答：
+        相比普通对话文本，该文本在"{axis_chinese}"维度上的程度是？回答：
     """
     user_lines = [f"文本内容：{content}"]
     user_lines.append(f"分析维度：{axis_chinese}")
@@ -202,7 +215,7 @@ def build_chat_messages(content, axis_chinese, definition=None, scale_descriptio
         user_lines.append(f"定义：{definition}")
     if scale_description:
         user_lines.append(f"评分标准：{scale_description}")
-    user_lines.append(f"该文本在\"{axis_chinese}\"维度上的评分是？回答： ")
+    user_lines.append(f"相比普通对话文本，该文本在\"{axis_chinese}\"维度上的程度是？回答： ")
     user_content = "\n".join(user_lines)
 
     return [
@@ -233,25 +246,26 @@ def get_first_token_ids(word_list, tokenizer):
 def extract_pragmatic_score(first_token_logprobs, pragmatic_ids):
     """从首token的logprobs中提取语用轴加权期望分数。
 
-    与extract_likert_score逻辑完全一致：5级verbalizer，等距权重[0, 0.25, 0.5, 0.75, 1.0]。
+    3级verbalizer设计（1/2/3），等距权重[0.0, 0.5, 1.0]。
+    相比5级verbalizer，3级减少中间分hedging倾向，强制LLM给出更明确的判断。
 
     Args:
         first_token_logprobs: vLLM返回的首token logprobs字典 {token_id: Logprob对象}
-        pragmatic_ids: verbalizer token id列表（对应"1"~"5"）
+        pragmatic_ids: verbalizer token id列表（对应"1"~"3"）
 
     Returns:
-        (score, level_probs): 加权期望分数(0~1), 5级概率列表
+        (score, level_probs): 加权期望分数(0~1), 3级概率列表
     """
     # logprobs → 概率
     probs_dict = {}
     for token_id, logprob_obj in first_token_logprobs.items():
         probs_dict[token_id] = math.exp(logprob_obj.logprob)
 
-    # 提取1~5等级的概率
+    # 提取1~3等级的概率
     level_probs = [probs_dict.get(tid, 0.0) for tid in pragmatic_ids]
 
     # 加权期望：score = Σ(w_k × p_k) / Σ(p_k + ε)
-    weights = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])
+    weights = torch.tensor([0.0, 0.5, 1.0])
     level_probs_t = torch.tensor(level_probs)
     total = level_probs_t.sum() + 1e-8  # 防零除
     score = (weights * level_probs_t / total).sum().item()
@@ -276,8 +290,8 @@ def generate_pragmatic_concept(data_path, output_path, csv_output_path, axes_pat
     3. 保存结果（JSON含完整信息，CSV为纯矩阵）
     """
     # --- 准备工作 ---
-    # 语用轴 verbalizer token id（与Likert相同：5级）
-    pragmatic_tokens = ["1", "2", "3", "4", "5"]
+    # 语用轴 verbalizer token id（3级：1/2/3，减少中间分hedging）
+    pragmatic_tokens = ["1", "2", "3"]
     pragmatic_ids = get_first_token_ids(pragmatic_tokens, tokenizer)
 
     # 加载语用轴定义
