@@ -150,6 +150,7 @@ def load_data(config, mode):
 
     概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
     dual模式下加载likert+intent两个文件并拼接为354维向量。
+    启用length_norm时，按文本长度归一化概念向量以消除长文本激活膨胀。
 
     Args:
         config: 配置文件（含concept_type字段）
@@ -170,9 +171,19 @@ def load_data(config, mode):
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
+    # 是否启用长度归一化（消除长文本概念激活膨胀）
+    length_norm = getattr(config, 'length_norm', False)
+
     concepts, labels = [], []
     for item in raw_concept_data:
-        concepts.append(item["concept"])
+        vec = item["concept"]
+        if length_norm:
+            # 归一化到等效长度20字: x_norm = x * log(21) / log(len+1)
+            # 长文本(100字) → 概念值缩小约1.3倍；短文本(10字) → 放大约1.4倍
+            content_len = len(item["content"])
+            norm_factor = np.log(content_len + 1) / np.log(21)
+            vec = [v / norm_factor for v in vec]
+        concepts.append(vec)
         labels.append(item["toxic"])
 
     # dual/dual_interact模式：加载intent概念向量
@@ -189,7 +200,12 @@ def load_data(config, mode):
         if concept_type == 'dual':
             # 简单拼接：[likert_177维, intent_177维] → 354维
             for i, item in enumerate(intent_data):
-                concepts[i] = concepts[i] + item["concept"]
+                intent_vec = item["concept"]
+                if length_norm:
+                    content_len = len(item["content"])
+                    norm_factor = np.log(content_len + 1) / np.log(21)
+                    intent_vec = [v / norm_factor for v in intent_vec]
+                concepts[i] = concepts[i] + intent_vec
         else:
             # dual_interact: 差异特征显式编码
             # [likert, intent, likert-intent, likert*intent] → 708维
@@ -197,6 +213,10 @@ def load_data(config, mode):
             for i, item in enumerate(intent_data):
                 likert_vec = np.array(concepts[i], dtype=np.float32)
                 intent_vec = np.array(item["concept"], dtype=np.float32)
+                if length_norm:
+                    content_len = len(item["content"])
+                    norm_factor = np.log(content_len + 1) / np.log(21)
+                    intent_vec = intent_vec / norm_factor
                 diff_vec = likert_vec - intent_vec
                 interact_vec = likert_vec * intent_vec
                 concepts[i] = np.concatenate([likert_vec, intent_vec, diff_vec, interact_vec]).tolist()
@@ -266,12 +286,36 @@ def train(config, train_dataset, val_dataset, test_dataset):
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
     # 初始化模型
+    gate_type = getattr(config, 'gate_type', 'matrix')
+    gate_init = None
+
+    # 矩阵门控和全局门控：从训练集计算 Cohen's d 作为门控初始化先验
+    if gate_type in ('global', 'matrix'):
+        train_x_all = train_dataset[:][0].numpy()
+        train_y_all = train_dataset[:][1].numpy()
+        toxic_mask = train_y_all == 1
+        non_mask = train_y_all == 0
+        toxic_mean = train_x_all[toxic_mask].mean(axis=0)
+        non_mean = train_x_all[non_mask].mean(axis=0)
+        toxic_std = train_x_all[toxic_mask].std(axis=0)
+        non_std = train_x_all[non_mask].std(axis=0)
+        pooled_std = np.sqrt((toxic_std**2 + non_std**2) / 2)
+        pooled_std = np.where(pooled_std < 1e-8, 1e-8, pooled_std)
+        gate_init = (toxic_mean - non_mean) / pooled_std
+        if gate_type == 'global':
+            print(f">>> 全局门控初始化: Cohen's d 均值={gate_init.mean():.4f}, d>0概念数={int((gate_init>0).sum())}/{len(gate_init)}")
+        else:
+            print(f">>> 矩阵门控偏置初始化: Cohen's d 均值={gate_init.mean():.4f}, d>0概念数={int((gate_init>0).sum())}/{len(gate_init)}")
+
     model = MLP(
         in_features=train_dataset[0][0].shape[0],
         dropout_rate=config.dropout_rate,
-        hidden_features=config.hidden_features
+        hidden_features=config.hidden_features,
+        gate_type=gate_type,
+        gate_init=gate_init
     ).to(device)
-    print(f">>> 使用标准MLP")
+    gate_l1_lambda = getattr(config, 'gate_l1_lambda', 0.0)
+    print(f">>> 使用MLP (gate_type={gate_type}, L1_lambda={gate_l1_lambda})")
 
     # 损失函数、优化器、学习率调度器
     criterion = nn.CrossEntropyLoss()
@@ -312,6 +356,10 @@ def train(config, train_dataset, val_dataset, test_dataset):
             optimizer.zero_grad()
             outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
+            # 门控L1正则化：强制稀疏性，防止门控学习噪声模式
+            if gate_l1_lambda > 0:
+                l1_loss = model.get_gate_l1_loss()
+                loss = loss + gate_l1_lambda * l1_loss
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -468,7 +516,9 @@ def evaluate(config, timestamp):
     model = MLP(
         in_features=test_x.shape[1],
         dropout_rate=saved_config.dropout_rate,
-        hidden_features=saved_config.hidden_features
+        hidden_features=saved_config.hidden_features,
+        gate_type=getattr(saved_config, 'gate_type', 'matrix'),
+        gate_init=None  # 测试时权重从checkpoint加载，无需初始化
     )
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
@@ -484,7 +534,11 @@ def evaluate(config, timestamp):
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.numpy())
             all_probs.extend(probs.cpu().numpy())
-            all_gates.extend(gate_weights.cpu().numpy())
+            if gate_weights is not None:
+                all_gates.extend(gate_weights.cpu().numpy())
+            else:
+                # 无门控模式：用零向量填充以保持数据结构一致
+                all_gates.extend(np.zeros((batch_x.shape[0], test_x.shape[1])))
 
     # 计算指标
     f1 = f1_score(all_labels, all_preds, average='macro')
@@ -609,6 +663,11 @@ def main():
             "dropout_rate": config.dropout_rate,
             "hidden_features": config.hidden_features,
             "patience": config.patience,
+
+            # 门控配置
+            "gate_type": getattr(config, 'gate_type', 'matrix'),
+            "gate_l1_lambda": getattr(config, 'gate_l1_lambda', 0.0),
+            "length_norm": getattr(config, 'length_norm', False),
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)
