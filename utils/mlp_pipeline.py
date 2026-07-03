@@ -109,8 +109,10 @@ def update_MLPConfig(args):
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
 
-    # 构建文件名后缀：binary加_binary
-    suffix = ""
+    # 构建文件名后缀：形容词词典版本 + concept_type后缀
+    adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
+    adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
+    suffix = f"_{adj_version}"
     if concept_type == 'binary':
         suffix += '_binary'
 
