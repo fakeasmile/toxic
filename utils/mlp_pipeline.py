@@ -94,14 +94,14 @@ def parse_args():
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
 
     # 概念向量类型
-    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary', 'intent', 'dual', 'dual_interact', 'pragmatic'], help='概念向量类型: likert (相关度), binary (是否评分), intent (意图信号), dual (双信号拼接, 354维), dual_interact (双信号+差异+交互特征, 708维), pragmatic (语用轴, 8维设计正交)')
+    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (相关度), binary (是否评分)')
 
     return parser.parse_args()
 
 
 def update_MLPConfig(args):
     """基于命令行参数更新配置对象"""
-    mlp_config = MLPConfig()  # MLP_config.py中的配置对象
+    mlp_config = MLPConfig()
 
     # 数据集配置
     mlp_config.dataset_name = args.dataset_name
@@ -122,13 +122,6 @@ def update_MLPConfig(args):
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                     / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
 
-    # dual/dual_interact模式下额外保存intent路径
-    if concept_type in ('dual', 'dual_interact'):
-        mlp_config.train_concept_path_intent = (mlp_config.processed_path / mlp_config.dataset_name
-                                                / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{intent_suffix}.json")
-        mlp_config.test_concept_path_intent = (mlp_config.processed_path / mlp_config.dataset_name
-                                               / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{intent_suffix}.json")
-
     mlp_config.concept_type = concept_type
     return mlp_config
 
@@ -137,8 +130,6 @@ def load_data(config, mode):
     """加载指定训练或测试的概念向量和标签。
 
     概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
-    dual模式下加载likert+intent两个文件并拼接为354维向量。
-    启用length_norm时，按文本长度归一化概念向量以消除长文本激活膨胀。
 
     Args:
         config: 配置文件（含concept_type字段）
@@ -155,59 +146,13 @@ def load_data(config, mode):
     else:
         raise ValueError("in load_data, mode must be 'train' or 'test'")
 
-    # 加载主概念向量文件（likert或intent或binary）
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
-    # 是否启用长度归一化（消除长文本概念激活膨胀）
-    length_norm = getattr(config, 'length_norm', False)
-
     concepts, labels = [], []
     for item in raw_concept_data:
-        vec = item["concept"]
-        if length_norm:
-            # 归一化到等效长度20字: x_norm = x * log(21) / log(len+1)
-            # 长文本(100字) → 概念值缩小约1.3倍；短文本(10字) → 放大约1.4倍
-            content_len = len(item["content"])
-            norm_factor = np.log(content_len + 1) / np.log(21)
-            vec = [v / norm_factor for v in vec]
-        concepts.append(vec)
+        concepts.append(item["concept"])
         labels.append(item["toxic"])
-
-    # dual/dual_interact模式：加载intent概念向量
-    concept_type = getattr(config, 'concept_type', 'likert')
-    if concept_type in ('dual', 'dual_interact'):
-        if mode == "train":
-            intent_path = config.train_concept_path_intent
-        else:
-            intent_path = config.test_concept_path_intent
-
-        with open(intent_path, "r", encoding="utf-8") as f:
-            intent_data = json.load(f)
-
-        if concept_type == 'dual':
-            # 简单拼接：[likert_177维, intent_177维] → 354维
-            for i, item in enumerate(intent_data):
-                intent_vec = item["concept"]
-                if length_norm:
-                    content_len = len(item["content"])
-                    norm_factor = np.log(content_len + 1) / np.log(21)
-                    intent_vec = [v / norm_factor for v in intent_vec]
-                concepts[i] = concepts[i] + intent_vec
-        else:
-            # dual_interact: 差异特征显式编码
-            # [likert, intent, likert-intent, likert*intent] → 708维
-            # 显式提供差异信号（相关但不表达 vs 表达但不相关）和交互信号（既相关又表达）
-            for i, item in enumerate(intent_data):
-                likert_vec = np.array(concepts[i], dtype=np.float32)
-                intent_vec = np.array(item["concept"], dtype=np.float32)
-                if length_norm:
-                    content_len = len(item["content"])
-                    norm_factor = np.log(content_len + 1) / np.log(21)
-                    intent_vec = intent_vec / norm_factor
-                diff_vec = likert_vec - intent_vec
-                interact_vec = likert_vec * intent_vec
-                concepts[i] = np.concatenate([likert_vec, intent_vec, diff_vec, interact_vec]).tolist()
 
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
@@ -274,36 +219,12 @@ def train(config, train_dataset, val_dataset, test_dataset):
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
     # 初始化模型
-    gate_type = getattr(config, 'gate_type', 'matrix')
-    gate_init = None
-
-    # 矩阵门控和全局门控：从训练集计算 Cohen's d 作为门控初始化先验
-    if gate_type in ('global', 'matrix'):
-        train_x_all = train_dataset[:][0].numpy()
-        train_y_all = train_dataset[:][1].numpy()
-        toxic_mask = train_y_all == 1
-        non_mask = train_y_all == 0
-        toxic_mean = train_x_all[toxic_mask].mean(axis=0)
-        non_mean = train_x_all[non_mask].mean(axis=0)
-        toxic_std = train_x_all[toxic_mask].std(axis=0)
-        non_std = train_x_all[non_mask].std(axis=0)
-        pooled_std = np.sqrt((toxic_std**2 + non_std**2) / 2)
-        pooled_std = np.where(pooled_std < 1e-8, 1e-8, pooled_std)
-        gate_init = (toxic_mean - non_mean) / pooled_std
-        if gate_type == 'global':
-            print(f">>> 全局门控初始化: Cohen's d 均值={gate_init.mean():.4f}, d>0概念数={int((gate_init>0).sum())}/{len(gate_init)}")
-        else:
-            print(f">>> 矩阵门控偏置初始化: Cohen's d 均值={gate_init.mean():.4f}, d>0概念数={int((gate_init>0).sum())}/{len(gate_init)}")
-
     model = MLP(
         in_features=train_dataset[0][0].shape[0],
         dropout_rate=config.dropout_rate,
         hidden_features=config.hidden_features,
-        gate_type=gate_type,
-        gate_init=gate_init
     ).to(device)
-    gate_l1_lambda = getattr(config, 'gate_l1_lambda', 0.0)
-    print(f">>> 使用MLP (gate_type={gate_type}, L1_lambda={gate_l1_lambda})")
+    print(f">>> 使用MLP (矩阵门控)")
 
     # 损失函数、优化器、学习率调度器
     criterion = nn.CrossEntropyLoss()
@@ -344,10 +265,6 @@ def train(config, train_dataset, val_dataset, test_dataset):
             optimizer.zero_grad()
             outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
-            # 门控L1正则化：强制稀疏性，防止门控学习噪声模式
-            if gate_l1_lambda > 0:
-                l1_loss = model.get_gate_l1_loss()
-                loss = loss + gate_l1_lambda * l1_loss
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -460,73 +377,37 @@ def evaluate(config, timestamp):
     contents = [item["content"] for item in raw_concept_data]
     concept_vectors = [item["concept"] for item in raw_concept_data]
 
-    # dual/dual_interact模式：加载intent概念向量并构造特征
-    concept_type = getattr(saved_config, 'concept_type', 'likert')
-    if concept_type in ('dual', 'dual_interact'):
-        with open(saved_config.test_concept_path_intent, "r", encoding="utf-8") as f:
-            intent_concept_data = json.load(f)
-
-        if concept_type == 'dual':
-            # 简单拼接：354维
-            for i, item in enumerate(intent_concept_data):
-                concept_vectors[i] = concept_vectors[i] + item["concept"]
-        else:
-            # dual_interact: 差异特征显式编码，708维
-            for i, item in enumerate(intent_concept_data):
-                likert_vec = np.array(concept_vectors[i], dtype=np.float32)
-                intent_vec = np.array(item["concept"], dtype=np.float32)
-                diff_vec = likert_vec - intent_vec
-                interact_vec = likert_vec * intent_vec
-                concept_vectors[i] = np.concatenate([likert_vec, intent_vec, diff_vec, interact_vec]).tolist()
-
     # 加载概念维度命名（用于结果可解释性）
     import csv
     adjective_names = []
     adjective_chinese = []
-    if concept_type == 'pragmatic':
-        # 语用轴：从pragmatic_axes.csv加载轴名
-        axes_path = Path(saved_config.adjective_path).parent / "pragmatic_axes.csv"
-        with open(axes_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            next(reader)
-            for row in reader:
-                adjective_names.append(row[0])  # axis_name
-                adjective_chinese.append(row[1] if len(row) > 1 else row[0])  # axis_chinese
-    else:
-        with open(saved_config.adjective_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            for row in reader:
-                adjective_names.append(row[0])
-                adjective_chinese.append(row[1] if len(row) > 1 else row[0])
+    with open(saved_config.adjective_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        for row in reader:
+            adjective_names.append(row[0])
+            adjective_chinese.append(row[1] if len(row) > 1 else row[0])
 
     # 加载最佳模型
     model = MLP(
         in_features=test_x.shape[1],
         dropout_rate=saved_config.dropout_rate,
         hidden_features=saved_config.hidden_features,
-        gate_type=getattr(saved_config, 'gate_type', 'matrix'),
-        gate_init=None  # 测试时权重从checkpoint加载，无需初始化
     )
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
 
-    # 推理（同时提取门控值和概率）
-    all_preds, all_labels, all_probs, all_gates = [], [], [], []
+    # 推理
+    all_preds, all_labels, all_probs = [], [], []
     with torch.no_grad():
         for batch_x, batch_y in test_loader:
             batch_x = batch_x.to(device)
-            outputs, gate_weights = model(batch_x, return_gate=True)
+            outputs = model(batch_x)
             probs = torch.softmax(outputs, dim=1)
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.numpy())
             all_probs.extend(probs.cpu().numpy())
-            if gate_weights is not None:
-                all_gates.extend(gate_weights.cpu().numpy())
-            else:
-                # 无门控模式：用零向量填充以保持数据结构一致
-                all_gates.extend(np.zeros((batch_x.shape[0], test_x.shape[1])))
 
     # 计算指标
     f1 = f1_score(all_labels, all_preds, average='macro')
@@ -569,16 +450,10 @@ def evaluate(config, timestamp):
         f.write(report)
         f.write("\n" + "=" * 30 + "\n")
 
-    # 保存逐条预测结果 JSON（含概念向量、概率、门控值，用于错误分析）
+    # 保存逐条预测结果 JSON（含概念向量、概率）
     label_names = ["Non-Toxic", "Toxic"]
     predictions = []
     for i in range(len(all_preds)):
-        # 构建概念-门控映射（仅保存非零门控，减少文件大小）
-        gate_dict = {}
-        for j, adj_name in enumerate(adjective_names):
-            if all_gates[i][j] > 0.01:  # 只保存门控值 > 0.01 的概念
-                gate_dict[f"{adj_name}({adjective_chinese[j]})"] = round(float(all_gates[i][j]), 4)
-
         predictions.append({
             "index": i,
             "content": contents[i],
@@ -592,7 +467,6 @@ def evaluate(config, timestamp):
                 "toxic": round(float(all_probs[i][1]), 4)
             },
             "concept_vector": [round(float(v), 4) for v in concept_vectors[i]],
-            "gate_values": gate_dict
         })
     with open(test_results_dir / "predictions.json", "w", encoding="utf-8") as f:
         json.dump(predictions, f, indent=2, ensure_ascii=False)
@@ -628,11 +502,7 @@ def main():
             "adjective_path": str(config.adjective_path),
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
-            "concept_dim": config.train_concept_path.stem,  # 概念向量文件名（含维度信息）
-
-            # dual模式下额外保存intent路径（用于测试时加载双信号）
-            "train_concept_path_intent": str(getattr(config, 'train_concept_path_intent', '')),
-            "test_concept_path_intent": str(getattr(config, 'test_concept_path_intent', '')),
+            "concept_dim": config.train_concept_path.stem,
 
             # 随机种子
             "seed": config.seed,
@@ -651,11 +521,6 @@ def main():
             "dropout_rate": config.dropout_rate,
             "hidden_features": config.hidden_features,
             "patience": config.patience,
-
-            # 门控配置
-            "gate_type": getattr(config, 'gate_type', 'matrix'),
-            "gate_l1_lambda": getattr(config, 'gate_l1_lambda', 0.0),
-            "length_norm": getattr(config, 'length_norm', False),
         }
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)

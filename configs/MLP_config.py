@@ -20,7 +20,7 @@ class MLPConfig():
         self.epochs = 200  # 训练轮数
         
         # OneCycleLR 学习率调度器参数
-        self.max_lr = 5e-4  # 峰值学习率
+        self.max_lr = 1e-3  # 峰值学习率
         self.pct_start = 0.2  # Warmup 占总步数的比例
         self.div_factor = 25.0  # 初始学习率 = max_lr / div_factor
         self.final_div_factor = 10000.0  # 最终学习率 = max_lr / final_div_factor
@@ -30,14 +30,6 @@ class MLPConfig():
         self.dropout_rate = 0.5  # Dropout 比率
         self.hidden_features = 96  # 隐藏层特征维度
         self.patience = 20  # 早停耐心值 (验证集F1连续patience个epoch未提升则停止训练)
-
-        # ========== 门控配置 ==========
-        # 门控类型: 'matrix'(177x177矩阵门控+Cohen's d偏置初始化), 'global'(全局门控), 'none'(无门控)
-        self.gate_type = 'matrix'
-        # 门控L1正则化系数(仅global和matrix模式生效)
-        self.gate_l1_lambda = 0
-        # 是否启用长度归一化(已验证有害，保持False)
-        self.length_norm = False
 
     def __repr__(self):
         """返回配置对象的字符串表示，包含所有配置项"""
