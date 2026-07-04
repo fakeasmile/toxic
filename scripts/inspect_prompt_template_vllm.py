@@ -68,6 +68,12 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": False,
         "prompt_suffix": "",
     },
+    "Qwen2.5-14B-Instruct": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
     "Qwen3.5-9B": {
         "quantization": "fp8",
         "is_qwen3": True,

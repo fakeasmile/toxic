@@ -78,6 +78,12 @@ MODEL_LOADING_CONFIG = {
         "is_multimodal": False,
         "prompt_suffix": "",
     },
+    "Qwen2.5-14B-Instruct": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
     "Qwen3.5-9B": {
         "quantization": "fp8",       # FP8在线量化，加速推理
         "is_qwen3": True,            # 需禁用thinking模式
