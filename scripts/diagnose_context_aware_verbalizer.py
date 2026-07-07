@@ -742,10 +742,17 @@ def main():
     elif d_change_simple > d_change_ctx + 0.005:
         log(f"  ⚠️ 简单指令优于两阶段，语用分析Stage 1可能引入噪声")
 
-    # 保存
+    # 保存概念向量缓存（供后续子空间分析使用）
+    cache_dir = project_root / "experiments"
+    np.save(str(cache_dir / "context_aware_baseline.npy"), baseline)
+    np.save(str(cache_dir / "context_aware_context.npy"), context)
+    np.save(str(cache_dir / "context_aware_simple.npy"), simple)
+    log(f"\n概念向量缓存已保存到: {cache_dir}")
+
+    # 保存报告
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    log(f"\n报告已保存到: {OUTPUT_PATH}")
+    log(f"报告已保存到: {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
