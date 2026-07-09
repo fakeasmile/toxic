@@ -58,7 +58,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from configs.MLP_config import MLPConfig
-from models.mlp import MLP
+from models.mlp import MLP, FormConditionedMLP, SimpleMLP, FormConditionedSimpleMLP
 
 # 配置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
@@ -96,6 +96,9 @@ def parse_args():
     # 概念向量类型
     parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (相关度), binary (是否评分)')
 
+    # 模型类型
+    parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'simple_mlp', 'form_conditioned_mlp', 'form_conditioned_simple_mlp'], help='模型类型: mlp (门控MLP), simple_mlp (无门控MLP), form_conditioned_mlp (Form条件化门控MLP), form_conditioned_simple_mlp (Form条件化偏置MLP)')
+
     return parser.parse_args()
 
 
@@ -123,6 +126,28 @@ def update_MLPConfig(args):
                                     / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
 
     mlp_config.concept_type = concept_type
+
+    # 模型类型
+    mlp_config.model_type = args.model_type
+
+    # Form-Conditioned Gate: 自动推导form概念向量路径
+    if args.model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp'):
+        mlp_config.train_form_concept_path = (
+            mlp_config.processed_path / mlp_config.dataset_name
+            / mlp_config.model_name
+            / f"concept_train_{mlp_config.model_name}_text_form.json"
+        )
+        mlp_config.test_form_concept_path = (
+            mlp_config.processed_path / mlp_config.dataset_name
+            / mlp_config.model_name
+            / f"concept_test_{mlp_config.model_name}_text_form.json"
+        )
+        # 检查form概念文件是否存在
+        if not mlp_config.train_form_concept_path.exists():
+            raise FileNotFoundError(f"训练集form概念文件不存在: {mlp_config.train_form_concept_path}")
+        if not mlp_config.test_form_concept_path.exists():
+            raise FileNotFoundError(f"测试集form概念文件不存在: {mlp_config.test_form_concept_path}")
+
     return mlp_config
 
 
@@ -155,6 +180,50 @@ def load_data(config, mode):
         labels.append(item["toxic"])
 
     return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+
+
+def load_dual_data(config, mode):
+    """同时加载语义概念向量和文本形式概念向量。
+
+    两个文件样本顺序完全一致，按索引对齐。
+
+    Args:
+        config: 配置文件（含train/test_form_concept_path字段）
+        mode: train/test
+
+    Returns:
+        tuple: (sem_concepts, form_concepts, labels) 三个张量
+    """
+    if mode == "train":
+        sem_path = config.train_concept_path
+        form_path = config.train_form_concept_path
+    elif mode == "test":
+        sem_path = config.test_concept_path
+        form_path = config.test_form_concept_path
+    else:
+        raise ValueError("mode must be 'train' or 'test'")
+
+    with open(sem_path, "r", encoding="utf-8") as f:
+        sem_data = json.load(f)
+    with open(form_path, "r", encoding="utf-8") as f:
+        form_data = json.load(f)
+
+    assert len(sem_data) == len(form_data), \
+        f"语义文件({len(sem_data)})与form文件({len(form_data)})样本数不一致"
+
+    sem_concepts, form_concepts, labels = [], [], []
+    for i in range(len(sem_data)):
+        assert sem_data[i]["content"] == form_data[i]["content"], \
+            f"第{i}条样本content不一致"
+        assert sem_data[i]["toxic"] == form_data[i]["toxic"], \
+            f"第{i}条样本toxic标签不一致"
+        sem_concepts.append(sem_data[i]["concept"])
+        form_concepts.append(form_data[i]["concept"])
+        labels.append(sem_data[i]["toxic"])
+
+    return (torch.tensor(sem_concepts, dtype=torch.float32),
+            torch.tensor(form_concepts, dtype=torch.float32),
+            torch.tensor(labels, dtype=torch.long))
 
 
 def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_recalls,
@@ -200,31 +269,86 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
     plt.close()
 
 
-def train(config, train_dataset, val_dataset, test_dataset):
+def train(config, train_dataset, val_dataset, test_dataset,
+          model_type="mlp", form_datasets=None):
     """训练MLP模型。
 
     基于验证集F1进行早停和最佳模型选择，同时观察测试集F1但不参与模型筛选。
 
     :param config: MLPConfig 配置对象
-    :param train_dataset: 训练集 (concepts, labels)
-    :param val_dataset: 验证集 (concepts, labels)
-    :param test_dataset: 测试集 (concepts, labels)，仅观察F1变化，不参与模型筛选
+    :param train_dataset: 训练集 (sem, labels) 或 (sem, labels)
+    :param val_dataset: 验证集 (sem, labels)
+    :param test_dataset: 测试集 (sem, labels)，仅观察F1变化，不参与模型筛选
+    :param model_type: 模型类型 "mlp"/"simple_mlp"/"form_conditioned_mlp"/"form_conditioned_simple_mlp"
+    :param form_datasets: form概念数据字典 {"train": tensor, "val": tensor, "test": tensor}，仅form模型使用
     :return: (epochs, val_losses, val_f1_scores, val_precisions, val_recalls, test_f1_scores, test_losses)
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f">>> 正在使用设备: {device}")
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+    in_features = train_dataset[0][0].shape[0]
+
+    # 是否需要form特征
+    is_form_model = model_type in ("form_conditioned_mlp", "form_conditioned_simple_mlp")
+
+    # 构建DataLoader
+    if is_form_model:
+        train_sem, train_y = train_dataset.tensors
+        val_sem, val_y = val_dataset.tensors
+        test_sem, test_y = test_dataset.tensors
+
+        train_form = form_datasets["train"]
+        val_form = form_datasets["val"]
+        test_form = form_datasets["test"]
+
+        train_loader = DataLoader(
+            TensorDataset(train_sem, train_form, train_y),
+            batch_size=config.batch_size, shuffle=True
+        )
+        val_loader = DataLoader(
+            TensorDataset(val_sem, val_form, val_y),
+            batch_size=config.batch_size, shuffle=False
+        )
+        test_loader = DataLoader(
+            TensorDataset(test_sem, test_form, test_y),
+            batch_size=config.batch_size, shuffle=False
+        )
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
     # 初始化模型
-    model = MLP(
-        in_features=train_dataset[0][0].shape[0],
-        dropout_rate=config.dropout_rate,
-        hidden_features=config.hidden_features,
-    ).to(device)
-    print(f">>> 使用MLP (矩阵门控)")
+    if model_type == "form_conditioned_mlp":
+        model = FormConditionedMLP(
+            in_features=in_features,
+            form_dim=config.form_dim,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用FormConditionedMLP (Form条件化门控)")
+    elif model_type == "form_conditioned_simple_mlp":
+        model = FormConditionedSimpleMLP(
+            in_features=in_features,
+            form_dim=config.form_dim,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用FormConditionedSimpleMLP (Form条件化偏置)")
+    elif model_type == "simple_mlp":
+        model = SimpleMLP(
+            in_features=in_features,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用SimpleMLP (无门控)")
+    else:
+        model = MLP(
+            in_features=in_features,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用MLP (矩阵门控)")
 
     # 损失函数、优化器、学习率调度器
     criterion = nn.CrossEntropyLoss()
@@ -260,10 +384,17 @@ def train(config, train_dataset, val_dataset, test_dataset):
     for epoch in range(config.epochs):
         # ========== 训练阶段 ==========
         model.train()
-        for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            outputs = model(batch_x)
+        for batch_data in train_loader:
+            if is_form_model:
+                batch_sem, batch_form, batch_y = batch_data
+                batch_sem, batch_form, batch_y = batch_sem.to(device), batch_form.to(device), batch_y.to(device)
+                optimizer.zero_grad()
+                outputs = model(batch_sem, batch_form)
+            else:
+                batch_x, batch_y = batch_data
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                optimizer.zero_grad()
+                outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
@@ -274,10 +405,17 @@ def train(config, train_dataset, val_dataset, test_dataset):
         val_preds, val_labels_list = [], []
         total_val_loss = 0.0
         with torch.no_grad():
-            for val_x, val_y in val_loader:
-                val_x, val_y = val_x.to(device), val_y.to(device)
-                val_outputs = model(val_x)
-                v_loss = criterion(val_outputs, val_y)
+            for batch_data in val_loader:
+                if is_form_model:
+                    val_sem, val_form, val_y = batch_data
+                    val_sem, val_form, val_y = val_sem.to(device), val_form.to(device), val_y.to(device)
+                    val_outputs = model(val_sem, val_form)
+                    v_loss = criterion(val_outputs, val_y)
+                else:
+                    val_x, val_y = batch_data
+                    val_x, val_y = val_x.to(device), val_y.to(device)
+                    val_outputs = model(val_x)
+                    v_loss = criterion(val_outputs, val_y)
                 total_val_loss += v_loss.item()
                 val_preds.extend(torch.argmax(val_outputs, dim=1).cpu().numpy())
                 val_labels_list.extend(val_y.cpu().numpy())
@@ -291,13 +429,23 @@ def train(config, train_dataset, val_dataset, test_dataset):
         test_preds, test_labels_list = [], []
         total_test_loss = 0.0
         with torch.no_grad():
-            for tx, ty in test_loader:
-                tx = tx.to(device)
-                t_outputs = model(tx)
-                t_loss = criterion(t_outputs, ty.to(device))
+            for batch_data in test_loader:
+                if is_form_model:
+                    t_sem, t_form, t_y = batch_data
+                    t_sem, t_form = t_sem.to(device), t_form.to(device)
+                    t_outputs = model(t_sem, t_form)
+                    t_loss = criterion(t_outputs, t_y.to(device))
+                else:
+                    tx, ty = batch_data
+                    tx = tx.to(device)
+                    t_outputs = model(tx)
+                    t_loss = criterion(t_outputs, ty.to(device))
                 total_test_loss += t_loss.item()
                 test_preds.extend(torch.argmax(t_outputs, dim=1).cpu().numpy())
-                test_labels_list.extend(ty.numpy())
+                if is_form_model:
+                    test_labels_list.extend(t_y.numpy())
+                else:
+                    test_labels_list.extend(ty.numpy())
 
         avg_test_loss = total_test_loss / len(test_loader)
         test_f1 = f1_score(test_labels_list, test_preds, average='macro')
@@ -367,9 +515,22 @@ def evaluate(config, timestamp):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # 从保存的配置中获取模型类型（兼容旧实验）
+    model_type = getattr(saved_config, 'model_type', 'mlp')
+    is_form_model = model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp')
+
     # 加载测试数据
     test_x, test_y = load_data(saved_config, "test")
-    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=int(saved_config.batch_size), shuffle=False)
+
+    # 构建DataLoader和模型
+    if is_form_model:
+        _, test_form_x, _ = load_dual_data(saved_config, "test")
+        test_loader = DataLoader(
+            TensorDataset(test_x, test_form_x, test_y),
+            batch_size=int(saved_config.batch_size), shuffle=False
+        )
+    else:
+        test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=int(saved_config.batch_size), shuffle=False)
 
     # 从概念向量文件中加载原始文本内容（逐条保存预测结果）
     with open(saved_config.test_concept_path, "r", encoding="utf-8") as f:
@@ -389,20 +550,45 @@ def evaluate(config, timestamp):
             adjective_chinese.append(row[1] if len(row) > 1 else row[0])
 
     # 加载最佳模型
-    model = MLP(
-        in_features=test_x.shape[1],
-        dropout_rate=saved_config.dropout_rate,
-        hidden_features=saved_config.hidden_features,
-    )
+    if model_type == 'form_conditioned_mlp':
+        model = FormConditionedMLP(
+            in_features=test_x.shape[1],
+            form_dim=getattr(saved_config, 'form_dim', 10),
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
+    elif model_type == 'form_conditioned_simple_mlp':
+        model = FormConditionedSimpleMLP(
+            in_features=test_x.shape[1],
+            form_dim=getattr(saved_config, 'form_dim', 10),
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
+    elif model_type == 'simple_mlp':
+        model = SimpleMLP(
+            in_features=test_x.shape[1],
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
+    else:
+        model = MLP(
+            in_features=test_x.shape[1],
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
     model.load_state_dict(torch.load(experiment_dir / "best_model.pth", map_location=device, weights_only=False))
     model.to(device).eval()
 
     # 推理
     all_preds, all_labels, all_probs = [], [], []
     with torch.no_grad():
-        for batch_x, batch_y in test_loader:
-            batch_x = batch_x.to(device)
-            outputs = model(batch_x)
+        for batch_data in test_loader:
+            if is_form_model:
+                batch_sem, batch_form, batch_y = batch_data
+                outputs = model(batch_sem.to(device), batch_form.to(device))
+            else:
+                batch_x, batch_y = batch_data
+                outputs = model(batch_x.to(device))
             probs = torch.softmax(outputs, dim=1)
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
@@ -489,12 +675,16 @@ def main():
         experiment_dir.mkdir(parents=True, exist_ok=True)
         config.experiment_path = experiment_dir
 
+        # 是否需要form特征
+        is_form_model = config.model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp')
+
         # 保存完整配置到config.json
         config_dict = {
             # 实验元信息
             "timestamp": timestamp,
             "experiment_path": str(config.experiment_path),
             "concept_type": getattr(args, 'concept_type', 'likert'),
+            "model_type": config.model_type,
 
             # 数据与词典
             "dataset_name": config.dataset_name,
@@ -521,7 +711,13 @@ def main():
             "dropout_rate": config.dropout_rate,
             "hidden_features": config.hidden_features,
             "patience": config.patience,
+            "form_dim": config.form_dim,
         }
+
+        # Form-Conditioned额外路径
+        if is_form_model:
+            config_dict["train_form_concept_path"] = str(config.train_form_concept_path)
+            config_dict["test_form_concept_path"] = str(config.test_form_concept_path)
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)
         print(f">>> 配置文件已保存至: {experiment_dir / 'config.json'}\n")
@@ -535,28 +731,50 @@ def main():
             print(">>> 已禁用确定性模式 (Randomness Enabled), 结果将不可复现")
 
         # 加载数据
-        train_x, train_y = load_data(config, "train")
-        test_x, test_y = load_data(config, "test")
+        if is_form_model:
+            train_sem, train_form, train_y = load_dual_data(config, "train")
+            test_sem, test_form, test_y = load_dual_data(config, "test")
 
-        # 从训练集中按9:1比例划分验证集（分层抽样）
-        train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
-            train_x.numpy(), train_y.numpy(),
-            test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
-        )
-        train_dataset = TensorDataset(
-            torch.tensor(train_x_np, dtype=torch.float32),
-            torch.tensor(train_y_np, dtype=torch.long)
-        )
-        val_dataset = TensorDataset(
-            torch.tensor(val_x_np, dtype=torch.float32),
-            torch.tensor(val_y_np, dtype=torch.long)
-        )
-        test_dataset = TensorDataset(test_x, test_y)
+            # 用索引切分确保sem和form使用相同train/val划分
+            indices = np.arange(len(train_sem))
+            train_idx, val_idx = train_test_split(
+                indices, test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
+            )
+
+            train_dataset = TensorDataset(train_sem[train_idx], train_y[train_idx])
+            val_dataset = TensorDataset(train_sem[val_idx], train_y[val_idx])
+            test_dataset = TensorDataset(test_sem, test_y)
+
+            form_datasets = {
+                "train": train_form[train_idx],
+                "val": train_form[val_idx],
+                "test": test_form,
+            }
+        else:
+            train_x, train_y = load_data(config, "train")
+            test_x, test_y = load_data(config, "test")
+
+            # 从训练集中按9:1比例划分验证集（分层抽样）
+            train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
+                train_x.numpy(), train_y.numpy(),
+                test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
+            )
+            train_dataset = TensorDataset(
+                torch.tensor(train_x_np, dtype=torch.float32),
+                torch.tensor(train_y_np, dtype=torch.long)
+            )
+            val_dataset = TensorDataset(
+                torch.tensor(val_x_np, dtype=torch.float32),
+                torch.tensor(val_y_np, dtype=torch.long)
+            )
+            test_dataset = TensorDataset(test_x, test_y)
+            form_datasets = None
 
         print(f">>> 训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
 
         # 训练并获取指标
-        metrics = train(config, train_dataset, val_dataset, test_dataset)
+        metrics = train(config, train_dataset, val_dataset, test_dataset,
+                        model_type=config.model_type, form_datasets=form_datasets)
 
         # 绘制训练曲线图
         plot_metrics(config, *metrics)

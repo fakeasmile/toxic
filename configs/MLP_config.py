@@ -31,6 +31,10 @@ class MLPConfig():
         self.hidden_features = 96  # 隐藏层特征维度
         self.patience = 20  # 早停耐心值 (验证集F1连续patience个epoch未提升则停止训练)
 
+        # ========== Form-Conditioned Gate 配置 ==========
+        self.form_dim = 10  # 文本形式特征维度
+        self.model_type = "mlp"  # 模型类型: "mlp" 或 "form_conditioned_mlp"
+
     def __repr__(self):
         """返回配置对象的字符串表示，包含所有配置项"""
         lines = [f"{self.__class__.__name__}:"]
