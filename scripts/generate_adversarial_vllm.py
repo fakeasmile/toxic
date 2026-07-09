@@ -1,14 +1,17 @@
 """生成对抗性观点概念向量（Chat Template + vLLM）
 
 核心思路：基于ACL论文4（双空间推理框架）的对抗性观点解耦思想，
-为同一条文本同时从"有害视角"和"中立视角"两个角度提取Likert概念分数，
-通过两个视角的差值/拼接来区分"讨论有毒"和"实施有毒"。
+为同一条文本同时从三个视角提取Likert概念分数，通过差值/拼接区分"讨论有毒"和"实施有毒"。
 
-【与原始generate的区别】
-1. 每个文本-形容词对生成两个分数：harmful_score 和 neutral_score
-2. 使用不同的system instruction引导不同视角
-3. 输出格式包含双视角信息
-4. 支持小数据集验证模式（--sample_size参数）
+【三视角设计】
+1. Harmful（有害视角）：假设文本具有攻击意图，提取语义层面的有害特征分数
+2. Neutral（中立视角）：客观评估文本是否体现该特征，不预设立场
+3. Intent（意图视角）：判断说话者是否主动表达/认同该特征，区分USE vs MENTION
+
+【关键假设】
+- TPs（真实有毒）: harmful高 + intent高 → 说话者在主动表达有害内容（USE）
+- FPs（讨论有毒）: harmful高 + intent低 → 说话者仅提及有害内容（MENTION）
+- intent分数与harmful分数的差值直接编码USE vs MENTION信号
 
 【使用方法】
 # 小样本验证（AutoDL运行）
@@ -129,7 +132,7 @@ def get_first_token_ids(word_list, tokenizer):
     return list(dict.fromkeys(token_ids))
 
 
-# 对抗性双视角System Instruction
+# 三视角System Instruction
 SYSTEM_INSTRUCTION_HARMFUL = (
     "你是一位语言分析专家，擅长识别文本中的隐含语义。\n"
     "**请从有害/攻击性视角**解读这段文本：假设该文本确实具有攻击意图或有害内容。\n"
@@ -146,6 +149,21 @@ SYSTEM_INSTRUCTION_NEUTRAL = (
     "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
 )
 
+SYSTEM_INSTRUCTION_INTENT = (
+    "你是一位语用学专家，擅长区分语言的使用（USE）和提及（MENTION）。\n"
+    "**请从说话者意图视角**评估这段文本：判断该形容词所描述的特征，是说话者在主动表达、认同或主张的观点，\n"
+    "还是说话者仅在被转述、引用、质疑或讨论中提及该特征。\n"
+    "只有当说话者明显认同或主动表达该特征时才给高分（4-5分）；\n"
+    "如果只是在引用、反问、让步或假设性讨论中提及，应给低分（1-2分）。\n"
+    "请用1到5的数字评估相关程度，1表示完全不相关，5表示非常相关。只回答一个数字。"
+)
+
+PERSPECTIVE_INSTRUCTIONS = {
+    "harmful": SYSTEM_INSTRUCTION_HARMFUL,
+    "neutral": SYSTEM_INSTRUCTION_NEUTRAL,
+    "intent": SYSTEM_INSTRUCTION_INTENT,
+}
+
 
 def build_chat_messages(content, adj, adj_definition=None, perspective="harmful"):
     user_lines = [f"文本内容：{content}"]
@@ -155,15 +173,11 @@ def build_chat_messages(content, adj, adj_definition=None, perspective="harmful"
     user_lines.append(f"该文本在多大程度上体现了\"{adj}\"所描述的特征？回答： ")
     user_content = "\n".join(user_lines)
 
-    if perspective == "harmful":
-        sys_instruction = SYSTEM_INSTRUCTION_HARMFUL
-    elif perspective == "neutral":
-        sys_instruction = SYSTEM_INSTRUCTION_NEUTRAL
-    else:
-        raise ValueError(f"不支持的视角: {perspective}")
+    if perspective not in PERSPECTIVE_INSTRUCTIONS:
+        raise ValueError(f"不支持的视角: {perspective}, 可选: {list(PERSPECTIVE_INSTRUCTIONS.keys())}")
 
     messages = [
-        {"role": "system", "content": sys_instruction},
+        {"role": "system", "content": PERSPECTIVE_INSTRUCTIONS[perspective]},
         {"role": "user", "content": user_content},
     ]
     return messages
@@ -185,7 +199,7 @@ def extract_likert_score(first_token_logprobs, likert_ids):
 def generate_adj_concept(data_path, output_path, adjective_path,
                          tokenizer, llm_model, is_qwen3=False,
                          prompt_suffix="", threshold=1e-4, sample_size=None):
-    """生成对抗性双视角概念向量"""
+    """生成三视角对抗性概念向量"""
     likert_tokens = ["1", "2", "3", "4", "5"]
     likert_ids = get_first_token_ids(likert_tokens, tokenizer)
 
@@ -205,67 +219,58 @@ def generate_adj_concept(data_path, output_path, adjective_path,
         print(f"已采样 {sample_size}/{len(data_set)} 条样本")
 
     sampling_params = SamplingParams(max_tokens=1, temperature=0, logprobs=20)
+    perspectives = ["harmful", "neutral", "intent"]
     results = []
 
     for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples")):
         content = sample["content"]
 
-        harmful_scores = []
-        neutral_scores = []
-        harmful_probs_list = []
-        neutral_probs_list = []
-
-        prompts_harmful = []
-        prompts_neutral = []
-
+        # 为每个视角准备批量prompts
+        all_prompts = {p: [] for p in perspectives}
         for adj, adj_def in zip(adjectives, adj_definitions):
-            msg_harmful = build_chat_messages(content, adj, adj_def, "harmful")
-            msg_neutral = build_chat_messages(content, adj, adj_def, "neutral")
-
             chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
+            for p in perspectives:
+                msg = build_chat_messages(content, adj, adj_def, p)
+                prompt_text = tokenizer.apply_chat_template(
+                    msg, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
+                ) + prompt_suffix
+                all_prompts[p].append(prompt_text)
 
-            p_harmful = tokenizer.apply_chat_template(
-                msg_harmful, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
-            ) + prompt_suffix
-            p_neutral = tokenizer.apply_chat_template(
-                msg_neutral, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
-            ) + prompt_suffix
+        # 三个视角批量推理
+        all_outputs = {}
+        for p in perspectives:
+            all_outputs[p] = llm_model.generate(all_prompts[p], sampling_params, use_tqdm=False)
 
-            prompts_harmful.append(p_harmful)
-            prompts_neutral.append(p_neutral)
-
-        # 批量推理有害视角
-        outputs_harmful = llm_model.generate(prompts_harmful, sampling_params, use_tqdm=False)
-        # 批量推理中立视角
-        outputs_neutral = llm_model.generate(prompts_neutral, sampling_params, use_tqdm=False)
-
+        # 提取分数
+        scores = {p: [] for p in perspectives}
+        probs = {p: [] for p in perspectives}
         for i in range(num_adjs):
-            logprobs_h = outputs_harmful[i].outputs[0].logprobs[0]
-            logprobs_n = outputs_neutral[i].outputs[0].logprobs[0]
+            for p in perspectives:
+                logprobs_i = all_outputs[p][i].outputs[0].logprobs[0]
+                s, lp = extract_likert_score(logprobs_i, likert_ids)
+                scores[p].append(s)
+                probs[p].append(lp)
 
-            h_score, h_probs = extract_likert_score(logprobs_h, likert_ids)
-            n_score, n_probs = extract_likert_score(logprobs_n, likert_ids)
+        if len(scores["harmful"]) != num_adjs:
+            raise RuntimeError("scores长度异常")
 
-            harmful_scores.append(h_score)
-            neutral_scores.append(n_score)
-            harmful_probs_list.append(h_probs)
-            neutral_probs_list.append(n_probs)
-
-        if len(harmful_scores) != num_adjs:
-            raise RuntimeError(f"harmful_scores长度异常")
-
-        # 计算差值向量（有害视角 - 中立视角）
-        diff_vector = [h - n for h, n in zip(harmful_scores, neutral_scores)]
-        truncated_diff = [s if abs(s) >= threshold else 0.0 for s in diff_vector]
+        # 计算差值向量
+        diff_hn = [h - n for h, n in zip(scores["harmful"], scores["neutral"])]
+        diff_hi = [h - it for h, it in zip(scores["harmful"], scores["intent"])]
+        truncated_diff_hn = [s if abs(s) >= threshold else 0.0 for s in diff_hn]
+        truncated_diff_hi = [s if abs(s) >= threshold else 0.0 for s in diff_hi]
 
         results.append({
             "content": content,
             "toxic": sample["toxic"],
-            "concept_harmful": harmful_scores,
-            "concept_neutral": neutral_scores,
-            "concept_diff": truncated_diff,
-            "likert_probs_harmful": harmful_probs_list,
-            "likert_probs_neutral": neutral_probs_list,
+            "concept_harmful": scores["harmful"],
+            "concept_neutral": scores["neutral"],
+            "concept_intent": scores["intent"],
+            "concept_diff_hn": truncated_diff_hn,
+            "concept_diff_hi": truncated_diff_hi,
+            "likert_probs_harmful": probs["harmful"],
+            "likert_probs_neutral": probs["neutral"],
+            "likert_probs_intent": probs["intent"],
         })
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -291,7 +296,7 @@ def main():
     output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_{adj_stem}_adversarial.json"
 
     print("\n" + "=" * 60)
-    print("对抗性观点概念向量生成")
+    print("对抗性观点概念向量生成（三视角：harmful + neutral + intent）")
     print("=" * 60)
     print(f"数据集: {args.dataset_name}, 模式: {args.mode}, 样本数: {args.sample_size or '全量'}")
     print(f"模型: {args.model_name}")
