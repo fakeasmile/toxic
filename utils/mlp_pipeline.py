@@ -96,6 +96,9 @@ def parse_args():
     # 概念向量类型
     parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (相关度), binary (是否评分)')
 
+    # 概念向量后缀（用于SNR加权等变体）
+    parser.add_argument('--concept_suffix', type=str, default=None, help='概念向量文件额外后缀 (如 _snr_weighted)')
+
     # 模型类型
     parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'simple_mlp', 'form_conditioned_mlp', 'form_conditioned_simple_mlp'], help='模型类型: mlp (门控MLP), simple_mlp (无门控MLP), form_conditioned_mlp (Form条件化门控MLP), form_conditioned_simple_mlp (Form条件化偏置MLP)')
 
@@ -113,12 +116,14 @@ def update_MLPConfig(args):
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
 
-    # 构建文件名后缀：形容词词典版本 + concept_type后缀
+    # 构建文件名后缀：形容词词典版本 + concept_type后缀 + concept_suffix
     adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
     adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
     suffix = f"_{adj_version}"
     if concept_type == 'binary':
         suffix += '_binary'
+    if getattr(args, 'concept_suffix', None):
+        suffix += f"_{args.concept_suffix}"  # e.g., _snr_weighted
 
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                      / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{suffix}.json")
@@ -684,6 +689,7 @@ def main():
             "timestamp": timestamp,
             "experiment_path": str(config.experiment_path),
             "concept_type": getattr(args, 'concept_type', 'likert'),
+            "concept_suffix": getattr(args, 'concept_suffix', None),
             "model_type": config.model_type,
 
             # 数据与词典
