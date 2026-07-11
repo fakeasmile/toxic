@@ -96,6 +96,9 @@ def parse_args():
     # 概念向量类型
     parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (相关度), binary (是否评分)')
 
+    # 形容词词典
+    parser.add_argument('--adjective_name', type=str, default=None, help='形容词词典文件名（如toxic_adjectives_v2.csv），默认使用MLP_config.py中的adjective_path')
+
     # 概念向量后缀（用于SNR加权等变体）
     parser.add_argument('--concept_suffix', type=str, default=None, help='概念向量文件额外后缀 (如 _snr_weighted)')
 
@@ -115,6 +118,10 @@ def update_MLPConfig(args):
 
     # 动态生成依赖 dataset_name/model_name 的路径
     concept_type = getattr(args, 'concept_type', 'likert')
+
+    # 形容词词典路径：命令行指定 > MLP_config.py默认值
+    if getattr(args, 'adjective_name', None) is not None:
+        mlp_config.adjective_path = mlp_config.raw_data_path / "adjective" / args.adjective_name
 
     # 构建文件名后缀：形容词词典版本 + concept_type后缀 + concept_suffix
     adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
