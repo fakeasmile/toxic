@@ -149,22 +149,31 @@ def compute_concept_snr(features, labels, concept_names, concept_types):
     return sorted(snr_list, key=lambda x: x['snr'], reverse=True)
 
 
-def compute_cross_correlation(feat_a, names_a, feat_b, names_b, top_k=10):
-    """计算两组概念特征之间的交叉相关性。"""
-    # 取主信号 (P(是) or P(3))
-    sig_a = feat_a[:, 1::2]  # 每个概念的第2个特征
-    sig_b = feat_b[:, 1::2]
+def compute_cross_correlation(sig_a, names_a, sig_b, names_b, top_k=10):
+    """计算两组主信号之间的交叉相关性。
+
+    Args:
+        sig_a: [N, n_a] A组主信号矩阵（每概念1维）
+        names_a: A组概念名称
+        sig_b: [N, n_b] B组主信号矩阵（每概念1维）
+        names_b: B组概念名称
+    """
+    n_a = len(names_a)
+    n_b = len(names_b)
+
+    # 确保维度匹配
+    assert sig_a.shape[1] == n_a, f"sig_a有{sig_a.shape[1]}列但names_a有{n_a}个"
+    assert sig_b.shape[1] == n_b, f"sig_b有{sig_b.shape[1]}列但names_b有{n_b}个"
 
     corr_matrix = np.corrcoef(sig_a.T, sig_b.T)
-    n_a = len(names_a)
 
     # 取跨组相关性 (a vs b)
-    cross_corr = corr_matrix[:n_a, n_a:]
+    cross_corr = corr_matrix[:n_a, n_a:n_a + n_b]
 
     # 找最高相关的概念对
     pairs = []
     for i in range(n_a):
-        for j in range(len(names_b)):
+        for j in range(n_b):
             pairs.append({
                 'concept_a': names_a[i], 'concept_b': names_b[j],
                 'r': cross_corr[i, j]
@@ -267,12 +276,15 @@ def main():
                 for row in reader:
                     adj_names.append(row[1] if len(row) > 1 else row[0])
 
-            # 新概念主信号
+            # 新概念主信号（每概念1维）
             new_sig_names = concept_names
-            new_sig_feat = all_features[:min_n, 1::2]
+            new_sig_feat = all_features[:min_n, 1::2]  # [N, 18]
+
+            # 形容词主信号（每概念1维）
+            adj_sig = adj_features[:, 1::2]  # [N, 132]
 
             top_pairs, cross_corr = compute_cross_correlation(
-                adj_features, adj_names, new_sig_feat, new_sig_names, top_k=10
+                adj_sig, adj_names, new_sig_feat, new_sig_names, top_k=10
             )
 
             print(f"\n  新概念与形容词最高相关的Top-10概念对:")
