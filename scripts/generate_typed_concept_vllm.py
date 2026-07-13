@@ -414,14 +414,17 @@ def main():
             for v in verbalizer:
                 probs[v] = 1.0 / len(verbalizer)
 
-        # 计算标量分数
+        # 计算标量分数（统一为"有害/肯定"概率，范围[0,1]）
         if ptype in BINARY_TYPES:
             score = probs.get("2", 0.0)
-            results[idx]["concept_scores"][ci] = score
+        else:
+            score = probs.get("3", 0.0)
+        results[idx]["concept_scores"][ci] = score
+
+        # 保存完整原始概率（level_probs），供下游灵活使用
+        if ptype in BINARY_TYPES:
             results[idx]["level_probs"][ci] = [probs.get("1", 0.0), probs.get("2", 0.0)]
         else:
-            score = (probs.get("2", 0.0) * 2 + probs.get("3", 0.0) * 3) / (probs.get("1", 0.0) + probs.get("2", 0.0) + probs.get("3", 0.0) + 1e-8)
-            results[idx]["concept_scores"][ci] = score
             results[idx]["level_probs"][ci] = [probs.get("1", 0.0), probs.get("2", 0.0), probs.get("3", 0.0)]
 
     # 填充content和toxic
