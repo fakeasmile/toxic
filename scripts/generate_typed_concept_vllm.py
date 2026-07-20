@@ -9,167 +9,319 @@
   - intent（意图概念）：二元verbalizer "1=否" "2=是"
   - effect（效果概念）：二元verbalizer "1=否" "2=是"
 
+标量分数统一为"有害/肯定"概率[0,1]：二元用P(2)，3级用P(3)。
+level_probs保留完整原始概率，供下游灵活使用。
+
 使用示例：
-    # 全量生成（训练集）
     python scripts/generate_typed_concept_vllm.py --mode train --dataset_name TOXICN --model_name glm-4-9b-chat
-
-    # 快速验证（200样本）
-    python scripts/generate_typed_concept_vllm.py --mode train --dataset_name TOXICN --model_name glm-4-9b-chat --num_samples 200
-
-    # 生成测试集
-    python scripts/generate_typed_concept_vllm.py --mode test --dataset_name TOXICN --model_name glm-4-9b-chat
+    python scripts/generate_typed_concept_vllm.py --mode test --dataset_name TOXICN --model_name glm-4-9b-chat --adjective_name toxic_adjectives_v4.csv
 """
 
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
 
+# AutoDL环境中OMP_NUM_THREADS可能被设为无效值，导致vLLM报错，需清理
+if "OMP_NUM_THREADS" in os.environ:
+    val = os.environ["OMP_NUM_THREADS"].strip()
+    if not val.isdigit() or int(val) <= 0:
+        os.environ.pop("OMP_NUM_THREADS")
+
 import numpy as np
+from tqdm import tqdm
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 
 project_root = Path(__file__).parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+from configs.MLP_config import MLPConfig
 
-# ============================================================
+
+# =============================================================================
+# 命令行参数
+# =============================================================================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="类型感知概念向量生成脚本（vLLM版本）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--mode', type=str, choices=['train', 'test'], required=True,
+                        help='train:生成训练集的概念向量，test:生成测试集的概念向量')
+    parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称(TOXICN/COLD)')
+    parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
+    parser.add_argument('--adjective_name', type=str, default='toxic_adjectives_v4.csv',
+                        help='概念词典文件名，默认toxic_adjectives_v4.csv')
+    parser.add_argument('--data_file', type=str, default=None,
+                        help='自定义数据文件名（如train_100.json），默认根据mode自动选择')
+    parser.add_argument('--num_samples', type=int, default=0,
+                        help='快速验证用，0=全量')
+    parser.add_argument('--prompt_mode', type=str, choices=['typed', 'uniform'], default='typed',
+                        help='提示词模式：typed=类型特定提示词(默认), uniform=统一提示词(仅verbalizer级别不同)')
+    parser.add_argument('--gpu_memory_utilization', type=float, default=0.85,
+                        help='vLLM GPU显存占用比例（0.0-1.0），默认0.85')
+    return parser.parse_args()
+
+
+# =============================================================================
+# 模型加载配置表
+# =============================================================================
+MODEL_LOADING_CONFIG = {
+    "Qwen2.5-7B-Instruct": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
+    "Qwen2.5-14B-Instruct": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
+    "Qwen3.5-9B": {
+        "quantization": "fp8",
+        "is_qwen3": True,
+        "is_multimodal": True,
+        "prompt_suffix": "",
+    },
+    "glm-4-9b-chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "\n",
+    },
+    "deepseek-llm-7b-chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
+    "Baichuan2-7B-Chat": {
+        "quantization": None,
+        "is_qwen3": False,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
+    "Qwen3-8B": {
+        "quantization": None,
+        "is_qwen3": True,
+        "is_multimodal": False,
+        "prompt_suffix": "",
+    },
+}
+
+
+def get_model_loading_config(model_name: str) -> dict:
+    if model_name not in MODEL_LOADING_CONFIG:
+        raise ValueError(
+            f"不支持的模型: {model_name}。请在 MODEL_LOADING_CONFIG 中添加该模型的配置条目后重试。"
+        )
+    return MODEL_LOADING_CONFIG[model_name].copy()
+
+
+# =============================================================================
+# 模型加载
+# =============================================================================
+def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: float = 0.85):
+    llm_path = model_path / model_name
+    if not llm_path.exists():
+        raise ValueError(f"LLM path {llm_path} does not exist")
+
+    model_config = get_model_loading_config(model_name)
+    quantization = model_config["quantization"]
+    is_multimodal = model_config["is_multimodal"]
+
+    print(f"Loading tokenizer from {llm_path}")
+    tokenizer = AutoTokenizer.from_pretrained(llm_path, trust_remote_code=True, padding_side="right")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    llm_kwargs = dict(
+        model=str(llm_path),
+        trust_remote_code=True,
+        dtype="auto",
+        gpu_memory_utilization=gpu_memory_utilization,
+        enable_prefix_caching=True,
+        max_model_len=1024,
+        max_num_seqs=64,
+        max_num_batched_tokens=16384,
+    )
+    if quantization is not None:
+        llm_kwargs["quantization"] = quantization
+
+    if is_multimodal:
+        llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+        llm_kwargs["language_model_only"] = True
+        print(f"检测到多模态模型({model_name})，已设置limit_mm_per_prompt + language_model_only")
+
+    print(f"Loading vLLM model from {llm_path}")
+    print(f"  量化方式: {quantization if quantization else '无量化'}")
+    llm = LLM(**llm_kwargs)
+
+    return tokenizer, llm, model_config["is_qwen3"]
+
+
+# =============================================================================
 # 提示词模板定义
-# ============================================================
+# =============================================================================
+
+# =============================================================================
+# 提示词设计原则（基于GLM-4-9B-Chat特性优化）：
+# 1. 结构化：角色设定 → 任务声明 → 回答规则 → 判断要点 → 输出格式
+# 2. 正面指令：用"选2的情形/选3的情形"替代"选否"，减少负面表述
+# 3. 消除时态偏差：行为型用"实施了"而非"正在发生"（文本是静态产物）
+# 4. 统一user prompt结构：概念定义 → 文本 → 问题 → 输出要求
+# 5. 定义前置：先给出概念定义，再呈现文本，便于模型建立判断框架
+# =============================================================================
 
 # 行为型提示词（二元判断）
 BEHAVIOR_SYSTEM = """你是一位语言分析专家，擅长识别文本中的有害行为。
-你的任务是判断文本中是否正在发生指定行为。
+
+任务：判断文本是否实施了指定行为。
 
 回答规则：
-1 — 否：文本中未发生该行为
-2 — 是：文本中正在发生该行为
+1 — 否：文本未实施该行为
+2 — 是：文本实施了该行为
 
 判断要点：
-- 关注文本是否实际实施了该行为，而非仅仅提及或讨论
-- 即使行为以隐含、暗示、反讽方式表达，只要实质上构成该行为，就选"是"
-- 报道、引用、分析、反驳他人该行为的，选"否"
+- "实施"指文本本身构成了该行为的实例，包括直接实施和以隐含、暗示、反讽方式实施
+- 选1的情形：仅提及、讨论、引用、分析该行为，而非实际实施
+- 选2的情形：文本本身就是该行为的实例，即使以非字面方式呈现
 - 只回答一个数字（1或2）"""
 
-BEHAVIOR_USER_TEMPLATE = """请判断以下文本中是否正在发生"{adj_chinese}"（{definition}）：
+BEHAVIOR_USER_TEMPLATE = """行为概念：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-只回答一个数字（1=否，2=是）："""
+该文本是否实施了上述行为？只回答一个数字（1=否，2=是）："""
 
 # 策略型提示词（二元判断）
-STRATEGY_SYSTEM = """你是一位语言分析专家，擅长识别文本中的沟通策略和修辞手段。
-你的任务是判断文本是否使用了指定的沟通策略。
+STRATEGY_SYSTEM = """你是一位语言分析专家，擅长识别文本中使用的沟通策略和修辞手段。
+
+任务：判断文本是否使用了指定策略。
 
 回答规则：
 1 — 否：文本未使用该策略
 2 — 是：文本使用了该策略
 
 判断要点：
-- 关注文本的实际表达策略，而非字面含义
-- 策略可能以隐蔽方式使用，需结合语境判断
-- 仅引用或讨论该策略但不实际使用的，选"否"
+- "使用"指文本实际采用了该策略进行表达，包括隐蔽和间接使用
+- 选1的情形：仅提及或讨论该策略本身，而非实际采用
+- 选2的情形：文本实际采用了该策略，需结合语境判断，策略可能以非字面方式呈现
 - 只回答一个数字（1或2）"""
 
-STRATEGY_USER_TEMPLATE = """请判断以下文本是否使用了"{adj_chinese}"策略（{definition}）：
+STRATEGY_USER_TEMPLATE = """策略概念：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-只回答一个数字（1=否，2=是）："""
+该文本是否使用了上述策略？只回答一个数字（1=否，2=是）："""
 
 # 评价型提示词（3级危害锚定）
 EVALUATION_SYSTEM = """你是一位语言分析专家，擅长评估文本中负面评价的表达方式。
-你的任务是判断文本与指定评价概念之间的关系级别。
+
+任务：判断文本与指定评价概念之间的关系级别。
 
 回答规则：
-1 — 不相关：文本与该评价概念无关
-2 — 存在但无害：文本中存在该评价概念，但以非有害方式呈现（如讨论、引用、分析、反驳）
-3 — 有害表达：文本以有害方式表达该评价（即使隐含、暗示、反讽也算）
+1 — 不相关：文本与该概念无关
+2 — 存在但无害：文本涉及该概念，但以非有害方式呈现
+3 — 有害表达：文本以有害方式体现了该概念
 
 判断要点：
-- "存在但无害"指文本虽然涉及该概念，但说话者并非在实施有害表达
-  例如：讨论贬义词汇的含义、分析偏见现象、引用他人言论后反驳
-- "有害表达"指文本本身就是该评价的有害实现
-  例如：实际使用贬义词汇攻击他人、表达偏见并以此贬低群体
-- 即使说话者无意伤害，若文本客观上以有害方式表达该评价，也应选3
+- 选2的情形：讨论概念含义、分析相关现象、引用他人言论后反驳、学术探讨
+- 选3的情形：实际使用贬损词汇攻击他人、表达偏见并以此贬低群体、以有害方式体现该概念
+- 即使说话者自称无意，若文本客观上构成有害表达，选3
 - 只回答一个数字（1、2或3）"""
 
-EVALUATION_USER_TEMPLATE = """请判断以下文本与"{adj_chinese}"（{definition}）的关系级别：
+EVALUATION_USER_TEMPLATE = """评价概念：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-1=不相关  2=存在但无害  3=有害表达
+该文本与上述评价概念的关系级别？1=不相关  2=存在但无害  3=有害表达
 只回答一个数字："""
 
 # 歧视型提示词（3级危害锚定，强调群体针对性）
 DISCRIMINATION_SYSTEM = """你是一位语言分析专家，擅长识别文本中针对特定群体的歧视表达。
-你的任务是判断文本与指定歧视概念之间的关系级别。
+
+任务：判断文本与指定歧视概念之间的关系级别。
 
 回答规则：
-1 — 不相关：文本与该歧视概念无关
-2 — 存在但无害：文本中存在该歧视概念，但以非有害方式呈现（如讨论歧视现象、反对歧视、学术分析）
-3 — 有害表达：文本以有害方式表达该歧视（针对特定群体的贬低、排斥、侮辱）
+1 — 不相关：文本与该概念无关
+2 — 存在但无害：文本涉及该概念，但以非有害方式呈现
+3 — 有害表达：文本以有害方式体现了该概念，构成对特定群体的歧视
 
 判断要点：
-- "存在但无害"指文本虽然涉及歧视话题，但说话者并非在实施歧视
-  例如：讨论性别歧视现象、反对地域偏见、分析歧视的社会原因
-- "有害表达"指文本本身构成对特定群体的歧视性攻击
-  例如：基于身份贬低群体价值、使用侮辱性称呼攻击特定群体
+- 选2的情形：讨论歧视现象、反对歧视、学术分析、引用后批判
+- 选3的情形：基于群体身份贬低价值、使用侮辱性称呼攻击特定群体、实施排斥或歧视
 - 重点关注是否针对特定群体身份（种族、性别、地域等）进行贬低
 - 只回答一个数字（1、2或3）"""
 
-DISCRIMINATION_USER_TEMPLATE = """请判断以下文本与"{adj_chinese}"（{definition}）的关系级别：
+DISCRIMINATION_USER_TEMPLATE = """歧视概念：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-1=不相关  2=存在但无害  3=有害表达
+该文本与上述歧视概念的关系级别？1=不相关  2=存在但无害  3=有害表达
 只回答一个数字："""
 
 # 中性概念提示词（3级危害锚定）
 NEUTRAL_SYSTEM = """你是一位语言分析专家，擅长评估文本的言语特征。
-你的任务是判断文本与指定言语特征之间的关系级别。
+
+任务：判断文本与指定言语特征之间的关系级别。
 
 回答规则：
 1 — 不相关：文本不具有该特征
 2 — 存在但无害：文本具有该特征，但未以有害方式呈现
-3 — 有害表达：文本以有害方式展现该特征
+3 — 有害表达：文本以有害方式展现了该特征
 
 判断要点：
-- 该特征本身是中性的，需判断其呈现方式是否有害
-- 例如"粗鲁的"可能只是表达方式直接但不伤人（选2），也可能构成人身攻击（选3）
+- 该特征本身是中性的，关键判断其呈现方式是否有害
+- 选2的情形：特征存在但不伤人，如表达直接但不构成攻击
+- 选3的情形：特征以有害方式呈现，如构成人身攻击或冒犯
 - 只回答一个数字（1、2或3）"""
 
-NEUTRAL_USER_TEMPLATE = """请判断以下文本与"{adj_chinese}"（{definition}）的关系级别：
+NEUTRAL_USER_TEMPLATE = """言语特征：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-1=不相关  2=存在但无害  3=有害表达
+该文本与上述言语特征的关系级别？1=不相关  2=存在但无害  3=有害表达
 只回答一个数字："""
 
 # 意图概念提示词（二元判断）
 INTENT_SYSTEM = """你是一位语言分析专家，擅长判断文本中说话者的表达意图。
-你的任务是判断说话者是否具有指定的表达意图。
+
+任务：判断说话者是否具有指定意图。
 
 回答规则：
 1 — 否：说话者不具有该意图
 2 — 是：说话者具有该意图
 
 判断要点：
-- 关注说话者的真实意图，而非字面含义
-- 即使说话者否认，若文本实质上表达了该意图，也应选"是"
-- 对于中立/善意意图，若文本确实客观中立或表达善意，选"是"
+- 关注说话者的真实意图，综合字面意思和隐含意思判断
+- 选2的情形：文本实质上表达了该意图，即使说话者口头否认
+- 对于中立或善意意图，若文本确实客观中立或表达善意，选2
 - 只回答一个数字（1或2）"""
 
-INTENT_USER_TEMPLATE = """请判断以下文本的说话者是否具有"{adj_chinese}"（{definition}）：
+INTENT_USER_TEMPLATE = """意图概念：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-只回答一个数字（1=否，2=是）："""
+该文本的说话者是否具有上述意图？只回答一个数字（1=否，2=是）："""
 
 # 效果概念提示词（二元判断）
 EFFECT_SYSTEM = """你是一位语言分析专家，擅长评估文本对读者可能产生的影响。
-你的任务是判断文本是否会产生指定效果。
+
+任务：判断文本是否会产生指定效果。
 
 回答规则：
 1 — 否：文本不会产生该效果
@@ -177,15 +329,16 @@ EFFECT_SYSTEM = """你是一位语言分析专家，擅长评估文本对读者�
 
 判断要点：
 - 关注文本客观上可能产生的效果，而非说话者的主观意图
-- 即使说话者无意，若文本客观上可能产生该效果，也应选"是"
+- 选2的情形：文本客观上可能产生该效果，即使说话者无意
 - "无害效果"指文本不会对他人造成实质性伤害
 - 只回答一个数字（1或2）"""
 
-EFFECT_USER_TEMPLATE = """请判断以下文本是否会产生"{adj_chinese}"（{definition}）：
+EFFECT_USER_TEMPLATE = """效果概念：{adj_chinese}
+定义：{definition}
 
 文本：{content}
 
-只回答一个数字（1=否，2=是）："""
+该文本是否会产生上述效果？只回答一个数字（1=否，2=是）："""
 
 
 # 模板映射
@@ -209,7 +362,7 @@ USER_TEMPLATES = {
     "effect": EFFECT_USER_TEMPLATE,
 }
 
-# Verbalizer映射：二元用{"1","2"}，3级用{"1","2","3"}
+# Verbalizer映射
 VERBALIZERS = {
     "behavior": ["1", "2"],
     "strategy": ["1", "2"],
@@ -220,21 +373,76 @@ VERBALIZERS = {
     "effect": ["1", "2"],
 }
 
-# 3级类型（保存level_probs）
+# 类型分类
 THREE_LEVEL_TYPES = {"evaluation", "discrimination", "neutral"}
-# 二元类型（保存binary_prob）
 BINARY_TYPES = {"behavior", "strategy", "intent", "effect"}
 
 
+# =============================================================================
+# Uniform提示词（对照实验用：所有概念用同一套措辞，仅verbalizer级别数不同）
+# 目的：分离"verbalizer级别数匹配"与"提示词措辞差异"对概念向量质量的贡献
+# =============================================================================
+
+UNIFORM_SYSTEM = """你是一位语言分析专家，擅长评估文本与指定概念之间的关系。
+
+任务：判断文本与指定概念之间的关系程度。
+
+判断原则：
+- 关注文本与概念之间的实质关系，而非字面意思
+- 即使以隐含、暗示、反讽方式呈现，只要实质上构成肯定关系，应给予肯定判断
+- 仅提及、讨论、引用该概念而非实际体现的，不构成肯定关系
+- 只回答指定选项中的一个数字"""
+
+UNIFORM_USER_BINARY = """概念：{adj_chinese}
+定义：{definition}
+
+文本：{content}
+
+文本与上述概念是否构成肯定关系？1=否  2=是
+只回答一个数字："""
+
+UNIFORM_USER_THREE = """概念：{adj_chinese}
+定义：{definition}
+
+文本：{content}
+
+文本与上述概念的关系级别？1=不相关  2=存在但无害  3=有害表达
+只回答一个数字："""
+
+
+def get_prompt_config(prompt_mode, concept):
+    """根据提示词模式和概念类型返回(system_prompt, user_template, verbalizer)。
+
+    prompt_mode='typed': 类型特定提示词（当前默认）
+    prompt_mode='uniform': 统一措辞，仅verbalizer级别数不同（对照实验）
+    """
+    ptype = concept["prompt_template"]
+
+    if prompt_mode == "uniform":
+        system_prompt = UNIFORM_SYSTEM
+        if ptype in BINARY_TYPES:
+            user_template = UNIFORM_USER_BINARY
+            verbalizer = ["1", "2"]
+        else:
+            user_template = UNIFORM_USER_THREE
+            verbalizer = ["1", "2", "3"]
+        return system_prompt, user_template, verbalizer
+    else:  # typed
+        return SYSTEM_PROMPTS[ptype], USER_TEMPLATES[ptype], VERBALIZERS[ptype]
+
+
+# =============================================================================
+# 概念词典加载
+# =============================================================================
 def load_concepts(csv_path):
-    """加载概念词典，返回概念列表。"""
     concepts = []
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            if not row["name"]:  # 跳过空行
+                continue
             concepts.append({
                 "name": row["name"],
-                "chinese": row.get("chinese", row["name"]),
                 "type": row["type"],
                 "category": row.get("category", "neutral"),
                 "definition": row["definition"],
@@ -243,209 +451,160 @@ def load_concepts(csv_path):
     return concepts
 
 
-def build_prompts(content, concept):
-    """根据概念类型构建对应的system和user prompt。"""
+# =============================================================================
+# Prompt构建
+# =============================================================================
+def build_prompts(content, concept, prompt_mode="typed"):
     ptype = concept["prompt_template"]
-    system_prompt = SYSTEM_PROMPTS[ptype]
-    user_prompt = USER_TEMPLATES[ptype].format(
-        adj_chinese=concept["chinese"],
-        definition=concept["definition"],
-        content=content,
-    )
+    if prompt_mode == "uniform":
+        system_prompt = UNIFORM_SYSTEM
+        if ptype in BINARY_TYPES:
+            user_prompt = UNIFORM_USER_BINARY.format(
+                adj_chinese=concept["name"],
+                definition=concept["definition"],
+                content=content,
+            )
+        else:
+            user_prompt = UNIFORM_USER_THREE.format(
+                adj_chinese=concept["name"],
+                definition=concept["definition"],
+                content=content,
+            )
+    else:
+        system_prompt = SYSTEM_PROMPTS[ptype]
+        user_prompt = USER_TEMPLATES[ptype].format(
+            adj_chinese=concept["name"],
+            definition=concept["definition"],
+            content=content,
+        )
     return system_prompt, user_prompt
 
 
 def get_verbalizer(concept):
-    """根据概念类型返回verbalizer词表。"""
     ptype = concept["prompt_template"]
     return VERBALIZERS[ptype]
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="类型感知概念向量生成脚本")
-    parser.add_argument("--mode", type=str, choices=["train", "test"], required=True)
-    parser.add_argument("--dataset_name", type=str, required=True)
-    parser.add_argument("--model_name", type=str, required=True)
-    parser.add_argument("--adjective_name", type=str, default="toxic_adjectives_v4.csv")
-    parser.add_argument("--data_file", type=str, default=None, help="自定义数据文件名（如train_100.json），默认根据mode自动选择")
-    parser.add_argument("--num_samples", type=int, default=0, help="快速验证用，0=全量")
-    parser.add_argument("--max_tokens", type=int, default=1)
-    parser.add_argument("--temperature", type=float, default=0)
-    parser.add_argument("--logprobs", type=int, default=20)
-    return parser.parse_args()
+# =============================================================================
+# 核心流程：类型感知概念向量生成
+# =============================================================================
+def generate_typed_concept(data_path, output_path, adjective_path,
+                           tokenizer, llm_model,
+                           is_qwen3=False, prompt_suffix="",
+                           num_samples=0, prompt_mode="typed"):
+    """生成类型感知概念向量。
 
+    对数据集中每条文本，遍历所有概念，根据概念类型使用不同的提示词和verbalizer，
+    提取概率分布，构建概念向量。
 
-def main():
-    args = parse_args()
-
-    # 延迟导入vLLM
-    from vllm import LLM, SamplingParams
-    from transformers import AutoTokenizer
-
-    # 路径
-    base_path = Path(__file__).parent.parent
-    data_dir = base_path / "data" / "raw" / args.dataset_name
-    processed_dir = base_path / "data" / "processed" / args.dataset_name / args.model_name
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    adj_path = base_path / "data" / "raw" / "adjective" / args.adjective_name
-
-    # 加载概念
-    concepts = load_concepts(adj_path)
-    print(f"概念总数: {len(concepts)}")
+    标量分数：二元用P(2)，3级用P(3)，统一为[0,1]范围。
+    level_probs：保留完整原始概率，供下游灵活使用。
+    """
+    # 加载概念词典
+    concepts = load_concepts(adjective_path)
+    num_concepts = len(concepts)
     type_counts = {}
     for c in concepts:
         ptype = c["prompt_template"]
-        type_counts[ptype] = type_counts.get(ptype, 0) + 1
-    for ptype, count in sorted(type_counts.items()):
         v_type = "3级" if ptype in THREE_LEVEL_TYPES else "二元"
+        type_counts.setdefault((ptype, v_type), 0)
+        type_counts[(ptype, v_type)] += 1
+    print(f"概念总数: {num_concepts}")
+    for (ptype, v_type), count in sorted(type_counts.items()):
         print(f"  {ptype}: {count}概念 ({v_type})")
 
-    # 加载数据
-    if args.data_file:
-        data_file = data_dir / args.data_file
-    else:
-        if args.mode == "train":
-            data_file = data_dir / "train.json"
-        else:
-            data_file = data_dir / "test.json"
+    # 加载数据集
+    with open(data_path, "r", encoding="utf-8") as f:
+        data_set = json.load(f)
+    if num_samples > 0:
+        data_set = data_set[:num_samples]
+        print(f"快速验证模式: 使用前{num_samples}条样本")
+    print(f"数据集大小: {len(data_set)}条")
 
-    with open(data_file, "r", encoding="utf-8") as f:
-        raw_data = json.load(f)
+    # 推理配置
+    sampling_params = SamplingParams(max_tokens=1, temperature=0, logprobs=20)
 
-    if args.num_samples > 0:
-        raw_data = raw_data[:args.num_samples]
-        print(f"快速验证模式: 使用前{args.num_samples}条样本")
+    results = []
 
-    print(f"数据: {len(raw_data)}条 ({args.mode})")
+    for sample_idx, sample in enumerate(tqdm(data_set, desc="Processing samples")):
+        content = sample["content"]
 
-    # 初始化模型
-    model_path = base_path / "models" / args.model_name
-    print(f"加载模型: {model_path}")
-
-    llm = LLM(model=str(model_path), trust_remote_code=True, gpu_memory_utilization=0.9)
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
-
-    # 判断是否有chat template
-    has_chat_template = tokenizer.chat_template is not None
-    print(f"Chat template: {'有' if has_chat_template else '无'}")
-
-    # 预构建所有prompt
-    print("构建提示词...")
-    all_prompts = []
-    all_verbalizers = []
-    all_ptypes = []
-    # 索引映射：prompt_idx -> (sample_idx, concept_idx)
-    prompt_map = []
-
-    for idx, item in enumerate(raw_data):
-        content = item["content"]
-        for ci, concept in enumerate(concepts):
-            system_prompt, user_prompt = build_prompts(content, concept)
-            verbalizer = get_verbalizer(concept)
-            ptype = concept["prompt_template"]
-
+        # 为当前文本构建所有概念的prompt
+        prompts = []
+        for concept in concepts:
+            system_prompt, user_prompt = build_prompts(content, concept, prompt_mode)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
+            chat_template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
+            prompt_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, **chat_template_kwargs
+            )
+            prompt_text += prompt_suffix
+            prompts.append(prompt_text)
 
-            if has_chat_template:
-                prompt_text = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True,
-                    prompt_suffix="\n"
-                )
+        # 批量推理：一次性送入当前文本的所有概念prompt
+        outputs = llm_model.generate(prompts, sampling_params, use_tqdm=False)
+
+        # 解析结果
+        concept_scores = [0.0] * num_concepts
+        level_probs_list = [None] * num_concepts
+
+        # 防御性校验
+        if len(outputs) != num_concepts:
+            raise RuntimeError(f"推理输出数量异常：期望{num_concepts}，实际{len(outputs)}")
+
+        for ci, (output, concept) in enumerate(zip(outputs, concepts)):
+            _, _, verbalizer = get_prompt_config(prompt_mode, concept)
+
+            # 提取首token logprobs
+            token_logprobs = {}
+            if output.outputs and output.outputs[0].logprobs:
+                first_token_logprobs = output.outputs[0].logprobs[0]
+                for token_id, logprob_info in first_token_logprobs.items():
+                    token_text = logprob_info.decoded_token.strip()
+                    if token_text in verbalizer:
+                        token_logprobs[token_text] = logprob_info.logprob
+
+            # 计算概率（softmax归一化）
+            probs = {}
+            if token_logprobs:
+                max_logprob = max(token_logprobs.values())
+                exp_sum = sum(np.exp(lp - max_logprob) for lp in token_logprobs.values())
+                for v in verbalizer:
+                    if v in token_logprobs:
+                        probs[v] = np.exp(token_logprobs[v] - max_logprob) / exp_sum
+                    else:
+                        probs[v] = 0.0
             else:
-                prompt_text = system_prompt + "\n\n" + user_prompt + "\n"
+                for v in verbalizer:
+                    probs[v] = 1.0 / len(verbalizer)
 
-            all_prompts.append(prompt_text)
-            all_verbalizers.append(verbalizer)
-            all_ptypes.append(ptype)
-            prompt_map.append((idx, ci))
+            # 标量分数：统一为"有害/肯定"概率[0,1]
+            if ptype in BINARY_TYPES:
+                concept_scores[ci] = probs.get("2", 0.0)
+                level_probs_list[ci] = [probs.get("1", 0.0), probs.get("2", 0.0)]
+            else:
+                concept_scores[ci] = probs.get("3", 0.0)
+                level_probs_list[ci] = [probs.get("1", 0.0), probs.get("2", 0.0), probs.get("3", 0.0)]
 
-    print(f"总prompt数: {len(all_prompts)}")
+        # 组装结果
+        results.append({
+            "content": sample["content"],
+            "toxic": sample.get("toxic", -1),
+            "concept_scores": concept_scores,
+            "level_probs": level_probs_list,
+        })
 
-    # 批量生成
-    sampling_params = SamplingParams(
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-        logprobs=args.logprobs,
-    )
-
-    batch_size = 256
-    all_outputs = []
-    for start in range(0, len(all_prompts), batch_size):
-        end = min(start + batch_size, len(all_prompts))
-        batch = all_prompts[start:end]
-        print(f"  生成中: {start}-{end}/{len(all_prompts)}")
-        outputs = llm.generate(batch, sampling_params)
-        all_outputs.extend(outputs)
-
-    # 解析结果
-    print("解析结果...")
-    results = [None] * len(raw_data)
-    for i in range(len(raw_data)):
-        results[i] = {"concept_scores": [0.0] * len(concepts), "level_probs": [None] * len(concepts)}
-
-    for pi, output in enumerate(all_outputs):
-        idx, ci = prompt_map[pi]
-        verbalizer = all_verbalizers[pi]
-        ptype = all_ptypes[pi]
-
-        # 提取logprobs
-        token_logprobs = {}
-        if output.outputs and output.outputs[0].logprobs:
-            first_token_logprobs = output.outputs[0].logprobs[0]
-            for token_id, logprob_info in first_token_logprobs.items():
-                token_text = logprob_info.decoded_token.strip()
-                if token_text in verbalizer:
-                    token_logprobs[token_text] = logprob_info.logprob
-
-        # 计算概率
-        probs = {}
-        if token_logprobs:
-            max_logprob = max(token_logprobs.values())
-            exp_sum = sum(np.exp(lp - max_logprob) for lp in token_logprobs.values())
-            for v in verbalizer:
-                if v in token_logprobs:
-                    probs[v] = np.exp(token_logprobs[v] - max_logprob) / exp_sum
-                else:
-                    probs[v] = 0.0
-        else:
-            for v in verbalizer:
-                probs[v] = 1.0 / len(verbalizer)
-
-        # 计算标量分数（统一为"有害/肯定"概率，范围[0,1]）
-        if ptype in BINARY_TYPES:
-            score = probs.get("2", 0.0)
-        else:
-            score = probs.get("3", 0.0)
-        results[idx]["concept_scores"][ci] = score
-
-        # 保存完整原始概率（level_probs），供下游灵活使用
-        if ptype in BINARY_TYPES:
-            results[idx]["level_probs"][ci] = [probs.get("1", 0.0), probs.get("2", 0.0)]
-        else:
-            results[idx]["level_probs"][ci] = [probs.get("1", 0.0), probs.get("2", 0.0), probs.get("3", 0.0)]
-
-    # 填充content和toxic
-    for idx, item in enumerate(raw_data):
-        results[idx]["content"] = item["content"]
-        results[idx]["toxic"] = item.get("toxic", -1)
-
-    # 保存结果
-    adj_suffix = Path(args.adjective_name).stem.replace("toxic_adjectives_", "")
-    suffix = f"typed_{adj_suffix}"
-    output_path = processed_dir / f"concept_{args.mode}_{args.model_name.replace('/', '-')}_{suffix}.json"
-
-    # 保存概念元信息
+    # 保存结果（含概念元信息）
     meta = {
-        "num_concepts": len(concepts),
+        "num_concepts": num_concepts,
         "concept_names": [c["name"] for c in concepts],
         "concept_types": [c["prompt_template"] for c in concepts],
-        "concept_chinese": [c.get("chinese", c["name"]) for c in concepts],
-        "adjective_file": args.adjective_name,
+        "adjective_file": adjective_path.name,
         "num_samples": len(results),
-        "mode": args.mode,
+        "mode": prompt_mode,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -458,22 +617,17 @@ def main():
         json.dump(save_data, f, ensure_ascii=False, indent=2)
 
     print(f"\n概念向量已保存至: {output_path}")
-    print(f"总概念数: {len(concepts)}, 总样本数: {len(results)}")
+    print(f"总概念数: {num_concepts}, 总样本数: {len(results)}")
 
     # 覆盖率统计
     type_coverage = {ptype: {"total": 0, "covered": 0} for ptype in VERBALIZERS}
     for item in results:
-        for i, concept in enumerate(concepts):
+        for ci, concept in enumerate(concepts):
             ptype = concept["prompt_template"]
-            lp = item["level_probs"][i]
-            if ptype in BINARY_TYPES:
-                type_coverage[ptype]["total"] += 1
-                if lp[0] > 0.01 or lp[1] > 0.01:
-                    type_coverage[ptype]["covered"] += 1
-            else:
-                type_coverage[ptype]["total"] += 1
-                if lp[0] > 0.01 or lp[1] > 0.01 or lp[2] > 0.01:
-                    type_coverage[ptype]["covered"] += 1
+            lp = item["level_probs"][ci]
+            type_coverage[ptype]["total"] += 1
+            if any(p > 0.01 for p in lp):
+                type_coverage[ptype]["covered"] += 1
 
     print("\nVerbalizer覆盖率:")
     for ptype, cov in type_coverage.items():
@@ -482,5 +636,67 @@ def main():
             print(f"  {ptype}: {rate:.2f}% ({cov['covered']}/{cov['total']})")
 
 
-if __name__ == "__main__":
+# =============================================================================
+# 主入口
+# =============================================================================
+def main():
+    args = parse_args()
+    config = MLPConfig()
+
+    # 构建路径
+    data_dir = config.raw_data_path / args.dataset_name
+    if args.data_file:
+        data_path = data_dir / args.data_file
+    else:
+        data_path = data_dir / f"{args.mode}.json"
+
+    adjective_path = config.raw_data_path / "adjective" / args.adjective_name
+    if not adjective_path.exists():
+        raise FileNotFoundError(f"概念词典不存在: {adjective_path}")
+
+    # 输出路径
+    adj_suffix = Path(args.adjective_name).stem.replace("toxic_adjectives_", "")
+    output_suffix = f"{args.prompt_mode}_{adj_suffix}"
+    concept_dir = config.processed_path / args.dataset_name / args.model_name
+    concept_dir.mkdir(parents=True, exist_ok=True)
+    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_{output_suffix}.json"
+
+    # 打印配置
+    print("\n" + "=" * 60)
+    print("类型感知概念向量生成(vLLM) - 配置信息")
+    print("=" * 60)
+    print(f"数据集名称: {args.dataset_name}")
+    print(f"LLM模型名称: {args.model_name}")
+    print(f"概念词典: {adjective_path.name}")
+    print(f"当前模式: {args.mode}")
+    print(f"提示词模式: {args.prompt_mode}")
+    print(f"数据集路径: {data_path}")
+    print(f"输出路径: {output_path}")
+    print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
+    print("=" * 60 + "\n")
+
+    # 加载模型
+    tokenizer, llm_model, qwen3_flag = load_vllm_model(
+        config.models_path, args.model_name, args.gpu_memory_utilization
+    )
+    if qwen3_flag:
+        print(f"检测到Qwen3+模型({args.model_name})，已禁用思考模式(enable_thinking=False)")
+
+    model_config = get_model_loading_config(args.model_name)
+    prompt_suffix = model_config.get("prompt_suffix", "")
+    if prompt_suffix:
+        print(f"检测到模型({args.model_name})需要追加prompt后缀: {repr(prompt_suffix)}")
+
+    # 执行概念向量生成
+    generate_typed_concept(
+        data_path, output_path, adjective_path,
+        tokenizer, llm_model,
+        is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix,
+        num_samples=args.num_samples, prompt_mode=args.prompt_mode,
+    )
+
+    print("生成完成")
+
+
+if __name__ == '__main__':
     main()
