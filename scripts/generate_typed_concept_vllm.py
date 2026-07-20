@@ -14,7 +14,7 @@ level_probs保留完整原始概率，供下游灵活使用。
 
 使用示例：
     python scripts/generate_typed_concept_vllm.py --mode train --dataset_name TOXICN --model_name glm-4-9b-chat
-    python scripts/generate_typed_concept_vllm.py --mode test --dataset_name TOXICN --model_name glm-4-9b-chat --adjective_name toxic_adjectives_v4.csv
+    python scripts/generate_typed_concept_vllm.py --mode test --dataset_name TOXICN --model_name glm-4-9b-chat
 """
 
 import argparse
@@ -61,8 +61,6 @@ def parse_args():
                         help='自定义数据文件名（如train_100.json），默认根据mode自动选择')
     parser.add_argument('--num_samples', type=int, default=0,
                         help='快速验证用，0=全量')
-    parser.add_argument('--prompt_mode', type=str, choices=['typed', 'uniform'], default='typed',
-                        help='提示词模式：typed=类型特定提示词(默认), uniform=统一提示词(仅verbalizer级别不同)')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.85,
                         help='vLLM GPU显存占用比例（0.0-1.0），默认0.85')
     return parser.parse_args()
@@ -169,18 +167,16 @@ def load_vllm_model(model_path: Path, model_name: str, gpu_memory_utilization: f
 
 # =============================================================================
 # 提示词模板定义
-# =============================================================================
-
-# =============================================================================
-# 提示词设计原则（基于GLM-4-9B-Chat特性优化）：
+#
+# 设计原则（基于GLM-4-9B-Chat特性优化）：
 # 1. 结构化：角色设定 → 任务声明 → 回答规则 → 判断要点 → 输出格式
 # 2. 正面指令：用"选2的情形/选3的情形"替代"选否"，减少负面表述
 # 3. 消除时态偏差：行为型用"实施了"而非"正在发生"（文本是静态产物）
-# 4. 统一user prompt结构：概念定义 → 文本 → 问题 → 输出要求
+# 4. 统一user prompt结构：类型化标签+定义 → 文本 → 问题 → 输出要求
 # 5. 定义前置：先给出概念定义，再呈现文本，便于模型建立判断框架
 # =============================================================================
 
-# 行为型提示词（二元判断）
+# --- 行为型提示词（二元判断）---
 BEHAVIOR_SYSTEM = """你是一位语言分析专家，擅长识别文本中的有害行为。
 
 任务：判断文本是否实施了指定行为。
@@ -195,14 +191,14 @@ BEHAVIOR_SYSTEM = """你是一位语言分析专家，擅长识别文本中的�
 - 选2的情形：文本本身就是该行为的实例，即使以非字面方式呈现
 - 只回答一个数字（1或2）"""
 
-BEHAVIOR_USER_TEMPLATE = """行为概念：{adj_chinese}
+BEHAVIOR_USER = """行为概念：{name}
 定义：{definition}
 
 文本：{content}
 
 该文本是否实施了上述行为？只回答一个数字（1=否，2=是）："""
 
-# 策略型提示词（二元判断）
+# --- 策略型提示词（二元判断）---
 STRATEGY_SYSTEM = """你是一位语言分析专家，擅长识别文本中使用的沟通策略和修辞手段。
 
 任务：判断文本是否使用了指定策略。
@@ -217,14 +213,14 @@ STRATEGY_SYSTEM = """你是一位语言分析专家，擅长识别文本中使�
 - 选2的情形：文本实际采用了该策略，需结合语境判断，策略可能以非字面方式呈现
 - 只回答一个数字（1或2）"""
 
-STRATEGY_USER_TEMPLATE = """策略概念：{adj_chinese}
+STRATEGY_USER = """策略概念：{name}
 定义：{definition}
 
 文本：{content}
 
 该文本是否使用了上述策略？只回答一个数字（1=否，2=是）："""
 
-# 评价型提示词（3级危害锚定）
+# --- 评价型提示词（3级危害锚定）---
 EVALUATION_SYSTEM = """你是一位语言分析专家，擅长评估文本中负面评价的表达方式。
 
 任务：判断文本与指定评价概念之间的关系级别。
@@ -240,7 +236,7 @@ EVALUATION_SYSTEM = """你是一位语言分析专家，擅长评估文本中负
 - 即使说话者自称无意，若文本客观上构成有害表达，选3
 - 只回答一个数字（1、2或3）"""
 
-EVALUATION_USER_TEMPLATE = """评价概念：{adj_chinese}
+EVALUATION_USER = """评价概念：{name}
 定义：{definition}
 
 文本：{content}
@@ -248,7 +244,7 @@ EVALUATION_USER_TEMPLATE = """评价概念：{adj_chinese}
 该文本与上述评价概念的关系级别？1=不相关  2=存在但无害  3=有害表达
 只回答一个数字："""
 
-# 歧视型提示词（3级危害锚定，强调群体针对性）
+# --- 歧视型提示词（3级危害锚定，强调群体针对性）---
 DISCRIMINATION_SYSTEM = """你是一位语言分析专家，擅长识别文本中针对特定群体的歧视表达。
 
 任务：判断文本与指定歧视概念之间的关系级别。
@@ -264,7 +260,7 @@ DISCRIMINATION_SYSTEM = """你是一位语言分析专家，擅长识别文本�
 - 重点关注是否针对特定群体身份（种族、性别、地域等）进行贬低
 - 只回答一个数字（1、2或3）"""
 
-DISCRIMINATION_USER_TEMPLATE = """歧视概念：{adj_chinese}
+DISCRIMINATION_USER = """歧视概念：{name}
 定义：{definition}
 
 文本：{content}
@@ -272,7 +268,7 @@ DISCRIMINATION_USER_TEMPLATE = """歧视概念：{adj_chinese}
 该文本与上述歧视概念的关系级别？1=不相关  2=存在但无害  3=有害表达
 只回答一个数字："""
 
-# 中性概念提示词（3级危害锚定）
+# --- 中性概念提示词（3级危害锚定）---
 NEUTRAL_SYSTEM = """你是一位语言分析专家，擅长评估文本的言语特征。
 
 任务：判断文本与指定言语特征之间的关系级别。
@@ -288,7 +284,7 @@ NEUTRAL_SYSTEM = """你是一位语言分析专家，擅长评估文本的言语
 - 选3的情形：特征以有害方式呈现，如构成人身攻击或冒犯
 - 只回答一个数字（1、2或3）"""
 
-NEUTRAL_USER_TEMPLATE = """言语特征：{adj_chinese}
+NEUTRAL_USER = """言语特征：{name}
 定义：{definition}
 
 文本：{content}
@@ -296,7 +292,7 @@ NEUTRAL_USER_TEMPLATE = """言语特征：{adj_chinese}
 该文本与上述言语特征的关系级别？1=不相关  2=存在但无害  3=有害表达
 只回答一个数字："""
 
-# 意图概念提示词（二元判断）
+# --- 意图概念提示词（二元判断）---
 INTENT_SYSTEM = """你是一位语言分析专家，擅长判断文本中说话者的表达意图。
 
 任务：判断说话者是否具有指定意图。
@@ -311,14 +307,14 @@ INTENT_SYSTEM = """你是一位语言分析专家，擅长判断文本中说话�
 - 对于中立或善意意图，若文本确实客观中立或表达善意，选2
 - 只回答一个数字（1或2）"""
 
-INTENT_USER_TEMPLATE = """意图概念：{adj_chinese}
+INTENT_USER = """意图概念：{name}
 定义：{definition}
 
 文本：{content}
 
 该文本的说话者是否具有上述意图？只回答一个数字（1=否，2=是）："""
 
-# 效果概念提示词（二元判断）
+# --- 效果概念提示词（二元判断）---
 EFFECT_SYSTEM = """你是一位语言分析专家，擅长评估文本对读者可能产生的影响。
 
 任务：判断文本是否会产生指定效果。
@@ -333,7 +329,7 @@ EFFECT_SYSTEM = """你是一位语言分析专家，擅长评估文本对读者�
 - "无害效果"指文本不会对他人造成实质性伤害
 - 只回答一个数字（1或2）"""
 
-EFFECT_USER_TEMPLATE = """效果概念：{adj_chinese}
+EFFECT_USER = """效果概念：{name}
 定义：{definition}
 
 文本：{content}
@@ -341,94 +337,21 @@ EFFECT_USER_TEMPLATE = """效果概念：{adj_chinese}
 该文本是否会产生上述效果？只回答一个数字（1=否，2=是）："""
 
 
-# 模板映射
-SYSTEM_PROMPTS = {
-    "behavior": BEHAVIOR_SYSTEM,
-    "strategy": STRATEGY_SYSTEM,
-    "evaluation": EVALUATION_SYSTEM,
-    "discrimination": DISCRIMINATION_SYSTEM,
-    "neutral": NEUTRAL_SYSTEM,
-    "intent": INTENT_SYSTEM,
-    "effect": EFFECT_SYSTEM,
+# =============================================================================
+# 提示词与Verbalizer注册表
+# =============================================================================
+PROMPT_REGISTRY = {
+    "behavior":       {"system": BEHAVIOR_SYSTEM,       "user": BEHAVIOR_USER,       "verbalizer": ["1", "2"]},
+    "strategy":       {"system": STRATEGY_SYSTEM,       "user": STRATEGY_USER,       "verbalizer": ["1", "2"]},
+    "evaluation":     {"system": EVALUATION_SYSTEM,     "user": EVALUATION_USER,     "verbalizer": ["1", "2", "3"]},
+    "discrimination": {"system": DISCRIMINATION_SYSTEM, "user": DISCRIMINATION_USER, "verbalizer": ["1", "2", "3"]},
+    "neutral":        {"system": NEUTRAL_SYSTEM,        "user": NEUTRAL_USER,        "verbalizer": ["1", "2", "3"]},
+    "intent":         {"system": INTENT_SYSTEM,         "user": INTENT_USER,         "verbalizer": ["1", "2"]},
+    "effect":         {"system": EFFECT_SYSTEM,         "user": EFFECT_USER,         "verbalizer": ["1", "2"]},
 }
 
-USER_TEMPLATES = {
-    "behavior": BEHAVIOR_USER_TEMPLATE,
-    "strategy": STRATEGY_USER_TEMPLATE,
-    "evaluation": EVALUATION_USER_TEMPLATE,
-    "discrimination": DISCRIMINATION_USER_TEMPLATE,
-    "neutral": NEUTRAL_USER_TEMPLATE,
-    "intent": INTENT_USER_TEMPLATE,
-    "effect": EFFECT_USER_TEMPLATE,
-}
-
-# Verbalizer映射
-VERBALIZERS = {
-    "behavior": ["1", "2"],
-    "strategy": ["1", "2"],
-    "evaluation": ["1", "2", "3"],
-    "discrimination": ["1", "2", "3"],
-    "neutral": ["1", "2", "3"],
-    "intent": ["1", "2"],
-    "effect": ["1", "2"],
-}
-
-# 类型分类
 THREE_LEVEL_TYPES = {"evaluation", "discrimination", "neutral"}
 BINARY_TYPES = {"behavior", "strategy", "intent", "effect"}
-
-
-# =============================================================================
-# Uniform提示词（对照实验用：所有概念用同一套措辞，仅verbalizer级别数不同）
-# 目的：分离"verbalizer级别数匹配"与"提示词措辞差异"对概念向量质量的贡献
-# =============================================================================
-
-UNIFORM_SYSTEM = """你是一位语言分析专家，擅长评估文本与指定概念之间的关系。
-
-任务：判断文本与指定概念之间的关系程度。
-
-判断原则：
-- 关注文本与概念之间的实质关系，而非字面意思
-- 即使以隐含、暗示、反讽方式呈现，只要实质上构成肯定关系，应给予肯定判断
-- 仅提及、讨论、引用该概念而非实际体现的，不构成肯定关系
-- 只回答指定选项中的一个数字"""
-
-UNIFORM_USER_BINARY = """概念：{adj_chinese}
-定义：{definition}
-
-文本：{content}
-
-文本与上述概念是否构成肯定关系？1=否  2=是
-只回答一个数字："""
-
-UNIFORM_USER_THREE = """概念：{adj_chinese}
-定义：{definition}
-
-文本：{content}
-
-文本与上述概念的关系级别？1=不相关  2=存在但无害  3=有害表达
-只回答一个数字："""
-
-
-def get_prompt_config(prompt_mode, concept):
-    """根据提示词模式和概念类型返回(system_prompt, user_template, verbalizer)。
-
-    prompt_mode='typed': 类型特定提示词（当前默认）
-    prompt_mode='uniform': 统一措辞，仅verbalizer级别数不同（对照实验）
-    """
-    ptype = concept["prompt_template"]
-
-    if prompt_mode == "uniform":
-        system_prompt = UNIFORM_SYSTEM
-        if ptype in BINARY_TYPES:
-            user_template = UNIFORM_USER_BINARY
-            verbalizer = ["1", "2"]
-        else:
-            user_template = UNIFORM_USER_THREE
-            verbalizer = ["1", "2", "3"]
-        return system_prompt, user_template, verbalizer
-    else:  # typed
-        return SYSTEM_PROMPTS[ptype], USER_TEMPLATES[ptype], VERBALIZERS[ptype]
 
 
 # =============================================================================
@@ -439,7 +362,7 @@ def load_concepts(csv_path):
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if not row["name"]:  # 跳过空行
+            if not row["name"]:
                 continue
             concepts.append({
                 "name": row["name"],
@@ -454,35 +377,17 @@ def load_concepts(csv_path):
 # =============================================================================
 # Prompt构建
 # =============================================================================
-def build_prompts(content, concept, prompt_mode="typed"):
+def build_prompt(content, concept):
+    """构建system_prompt和user_prompt。"""
     ptype = concept["prompt_template"]
-    if prompt_mode == "uniform":
-        system_prompt = UNIFORM_SYSTEM
-        if ptype in BINARY_TYPES:
-            user_prompt = UNIFORM_USER_BINARY.format(
-                adj_chinese=concept["name"],
-                definition=concept["definition"],
-                content=content,
-            )
-        else:
-            user_prompt = UNIFORM_USER_THREE.format(
-                adj_chinese=concept["name"],
-                definition=concept["definition"],
-                content=content,
-            )
-    else:
-        system_prompt = SYSTEM_PROMPTS[ptype]
-        user_prompt = USER_TEMPLATES[ptype].format(
-            adj_chinese=concept["name"],
-            definition=concept["definition"],
-            content=content,
-        )
+    reg = PROMPT_REGISTRY[ptype]
+    system_prompt = reg["system"]
+    user_prompt = reg["user"].format(
+        name=concept["name"],
+        definition=concept["definition"],
+        content=content,
+    )
     return system_prompt, user_prompt
-
-
-def get_verbalizer(concept):
-    ptype = concept["prompt_template"]
-    return VERBALIZERS[ptype]
 
 
 # =============================================================================
@@ -491,7 +396,7 @@ def get_verbalizer(concept):
 def generate_typed_concept(data_path, output_path, adjective_path,
                            tokenizer, llm_model,
                            is_qwen3=False, prompt_suffix="",
-                           num_samples=0, prompt_mode="typed"):
+                           num_samples=0):
     """生成类型感知概念向量。
 
     对数据集中每条文本，遍历所有概念，根据概念类型使用不同的提示词和verbalizer，
@@ -513,6 +418,11 @@ def generate_typed_concept(data_path, output_path, adjective_path,
     for (ptype, v_type), count in sorted(type_counts.items()):
         print(f"  {ptype}: {count}概念 ({v_type})")
 
+    # 验证所有概念的prompt_template都已在注册表中
+    for c in concepts:
+        if c["prompt_template"] not in PROMPT_REGISTRY:
+            raise ValueError(f"概念'{c['name']}'的prompt_template='{c['prompt_template']}'不在PROMPT_REGISTRY中")
+
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
@@ -532,7 +442,7 @@ def generate_typed_concept(data_path, output_path, adjective_path,
         # 为当前文本构建所有概念的prompt
         prompts = []
         for concept in concepts:
-            system_prompt, user_prompt = build_prompts(content, concept, prompt_mode)
+            system_prompt, user_prompt = build_prompt(content, concept)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -547,16 +457,17 @@ def generate_typed_concept(data_path, output_path, adjective_path,
         # 批量推理：一次性送入当前文本的所有概念prompt
         outputs = llm_model.generate(prompts, sampling_params, use_tqdm=False)
 
-        # 解析结果
-        concept_scores = [0.0] * num_concepts
-        level_probs_list = [None] * num_concepts
-
         # 防御性校验
         if len(outputs) != num_concepts:
             raise RuntimeError(f"推理输出数量异常：期望{num_concepts}，实际{len(outputs)}")
 
+        # 解析结果
+        concept_scores = [0.0] * num_concepts
+        level_probs_list = [None] * num_concepts
+
         for ci, (output, concept) in enumerate(zip(outputs, concepts)):
-            _, _, verbalizer = get_prompt_config(prompt_mode, concept)
+            ptype = concept["prompt_template"]
+            verbalizer = PROMPT_REGISTRY[ptype]["verbalizer"]
 
             # 提取首token logprobs
             token_logprobs = {}
@@ -604,7 +515,6 @@ def generate_typed_concept(data_path, output_path, adjective_path,
         "concept_types": [c["prompt_template"] for c in concepts],
         "adjective_file": adjective_path.name,
         "num_samples": len(results),
-        "mode": prompt_mode,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -620,7 +530,7 @@ def generate_typed_concept(data_path, output_path, adjective_path,
     print(f"总概念数: {num_concepts}, 总样本数: {len(results)}")
 
     # 覆盖率统计
-    type_coverage = {ptype: {"total": 0, "covered": 0} for ptype in VERBALIZERS}
+    type_coverage = {ptype: {"total": 0, "covered": 0} for ptype in PROMPT_REGISTRY}
     for item in results:
         for ci, concept in enumerate(concepts):
             ptype = concept["prompt_template"]
@@ -656,10 +566,9 @@ def main():
 
     # 输出路径
     adj_suffix = Path(args.adjective_name).stem.replace("toxic_adjectives_", "")
-    output_suffix = f"{args.prompt_mode}_{adj_suffix}"
     concept_dir = config.processed_path / args.dataset_name / args.model_name
     concept_dir.mkdir(parents=True, exist_ok=True)
-    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_{output_suffix}.json"
+    output_path = concept_dir / f"concept_{args.mode}_{args.model_name}_typed_{adj_suffix}.json"
 
     # 打印配置
     print("\n" + "=" * 60)
@@ -669,7 +578,6 @@ def main():
     print(f"LLM模型名称: {args.model_name}")
     print(f"概念词典: {adjective_path.name}")
     print(f"当前模式: {args.mode}")
-    print(f"提示词模式: {args.prompt_mode}")
     print(f"数据集路径: {data_path}")
     print(f"输出路径: {output_path}")
     print(f"GPU显存占用比例: {args.gpu_memory_utilization}")
@@ -692,7 +600,7 @@ def main():
         data_path, output_path, adjective_path,
         tokenizer, llm_model,
         is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix,
-        num_samples=args.num_samples, prompt_mode=args.prompt_mode,
+        num_samples=args.num_samples,
     )
 
     print("生成完成")
