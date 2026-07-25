@@ -59,6 +59,7 @@ if str(project_root) not in sys.path:
 
 from configs.MLP_config import MLPConfig
 from models.mlp import MLP, FormConditionedMLP, SimpleMLP, FormConditionedSimpleMLP
+from utils.concept_features import extract_concept_features
 
 # 配置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'FangSong']
@@ -102,6 +103,9 @@ def parse_args():
     # 概念向量后缀（用于SNR加权等变体）
     parser.add_argument('--concept_suffix', type=str, default=None, help='概念向量文件额外后缀 (如 _snr_weighted)')
 
+    # 概念向量格式
+    parser.add_argument('--concept_format', type=str, default='typed', choices=['legacy', 'typed'], help='概念向量格式: legacy (旧格式, item["concept"]), typed (新格式, level_probs+concept_types)')
+
     # 模型类型
     parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'simple_mlp', 'form_conditioned_mlp', 'form_conditioned_simple_mlp'], help='模型类型: mlp (门控MLP), simple_mlp (无门控MLP), form_conditioned_mlp (Form条件化门控MLP), form_conditioned_simple_mlp (Form条件化偏置MLP)')
 
@@ -124,9 +128,13 @@ def update_MLPConfig(args):
         mlp_config.adjective_path = mlp_config.raw_data_path / "adjective" / args.adjective_name
 
     # 构建文件名后缀：形容词词典版本 + concept_type后缀 + concept_suffix
-    adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v1
-    adj_version = adj_stem.replace("toxic_adjectives_", "")  # v1
-    suffix = f"_{adj_version}"
+    adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v4
+    adj_version = adj_stem.replace("toxic_adjectives_", "")  # v4
+    concept_format = getattr(args, 'concept_format', 'legacy')
+    if concept_format == 'typed':
+        suffix = f"_typed_{adj_version}"
+    else:
+        suffix = f"_{adj_version}"
     if concept_type == 'binary':
         suffix += '_binary'
     if getattr(args, 'concept_suffix', None):
@@ -138,6 +146,7 @@ def update_MLPConfig(args):
                                     / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
 
     mlp_config.concept_type = concept_type
+    mlp_config.concept_format = concept_format
 
     # 模型类型
     mlp_config.model_type = args.model_type
@@ -166,10 +175,14 @@ def update_MLPConfig(args):
 def load_data(config, mode):
     """加载指定训练或测试的概念向量和标签。
 
-    概念向量文件中已包含 toxic 标签字段，无需再加载原始数据集。
+    支持两种概念向量JSON格式：
+    - legacy格式：扁平列表 [{content, toxic, concept: [float]}, ...]
+    - typed格式：嵌套结构 {meta: {concept_types: [...]}, data: [{content, toxic, concept_scores, level_probs}]}
+
+    typed格式使用 concept_features.py 提取特征，支持 single/conditional/all_probs 三种模式。
 
     Args:
-        config: 配置文件（含concept_type字段）
+        config: 配置文件（含concept_type, concept_format, concept_feat_mode字段）
         mode: train/test，区分加载训练或实验数据集
 
     Returns:
@@ -184,14 +197,28 @@ def load_data(config, mode):
         raise ValueError("in load_data, mode must be 'train' or 'test'")
 
     with open(concept_path, "r", encoding="utf-8") as f:
-        raw_concept_data = json.load(f)
+        raw_data = json.load(f)
 
-    concepts, labels = [], []
-    for item in raw_concept_data:
-        concepts.append(item["concept"])
-        labels.append(item["toxic"])
+    # 检测格式：typed格式有meta和data键，legacy格式是扁平列表
+    concept_format = getattr(config, 'concept_format', 'legacy')
 
-    return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+    if concept_format == 'typed' or (isinstance(raw_data, dict) and 'meta' in raw_data and 'data' in raw_data):
+        # typed格式：使用concept_features.py提取特征
+        meta = raw_data['meta']
+        data = raw_data['data']
+        concept_types = meta['concept_types']
+        feat_mode = getattr(config, 'concept_feat_mode', 'single')
+
+        X, y, feature_names = extract_concept_features(data, concept_types, mode=feat_mode)
+        print(f"  [typed格式] 特征模式={feat_mode}, 特征维度={X.shape[1]} (概念数={len(concept_types)})")
+        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
+    else:
+        # legacy格式：直接读取concept字段
+        concepts, labels = [], []
+        for item in raw_data:
+            concepts.append(item["concept"])
+            labels.append(item["toxic"])
+        return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
 
 
 def load_dual_data(config, mode):
@@ -547,8 +574,15 @@ def evaluate(config, timestamp):
     # 从概念向量文件中加载原始文本内容（逐条保存预测结果）
     with open(saved_config.test_concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
-    contents = [item["content"] for item in raw_concept_data]
-    concept_vectors = [item["concept"] for item in raw_concept_data]
+
+    # 兼容两种格式：typed(嵌套) / legacy(扁平)
+    if isinstance(raw_concept_data, dict) and 'data' in raw_concept_data:
+        raw_items = raw_concept_data['data']
+        concept_vectors = [item["concept_scores"] for item in raw_items]
+    else:
+        raw_items = raw_concept_data
+        concept_vectors = [item["concept"] for item in raw_items]
+    contents = [item["content"] for item in raw_items]
 
     # 加载概念维度命名（用于结果可解释性）
     import csv
@@ -696,6 +730,8 @@ def main():
             "timestamp": timestamp,
             "experiment_path": str(config.experiment_path),
             "concept_type": getattr(args, 'concept_type', 'likert'),
+            "concept_format": getattr(args, 'concept_format', 'legacy'),
+            "concept_feat_mode": config.concept_feat_mode,
             "concept_suffix": getattr(args, 'concept_suffix', None),
             "model_type": config.model_type,
 

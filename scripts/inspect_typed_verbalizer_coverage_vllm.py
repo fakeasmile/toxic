@@ -22,6 +22,7 @@
 """
 
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ from datetime import datetime
 from collections import defaultdict
 
 import numpy as np
+from tqdm import tqdm
 
 if "OMP_NUM_THREADS" in os.environ:
     val = os.environ["OMP_NUM_THREADS"].strip()
@@ -67,8 +69,7 @@ GPU_MEMORY_UTILIZATION = 0.85
 def analyze_single_text(text_content, text_label, concepts, tokenizer, llm_model,
                         is_qwen3, prompt_suffix):
     """对单条文本遍历所有概念，返回每个概念的verbalizer概率数据。"""
-    from vllm import SamplingParams
-    sampling_params = SamplingParams(max_tokens=1, temperature=0, logprobs=20)
+    sampling_params = __import__("vllm").SamplingParams(max_tokens=1, temperature=0, logprobs=20)
 
     # 构建所有概念的prompt
     prompts = []
