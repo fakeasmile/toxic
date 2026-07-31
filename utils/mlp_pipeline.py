@@ -58,7 +58,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from configs.MLP_config import MLPConfig
-from models.mlp import MLP, FormConditionedMLP, SimpleMLP, FormConditionedSimpleMLP
+from models.mlp import MLP, FormConditionedMLP, SimpleMLP, FormConditionedSimpleMLP, HierarchicalTypeGatedMLP, TypeAugmentedGatedMLP, DivergenceAwareGatedMLP
 from utils.concept_features import extract_concept_features
 
 # 配置中文字体
@@ -107,7 +107,7 @@ def parse_args():
     parser.add_argument('--concept_format', type=str, default='typed', choices=['legacy', 'typed'], help='概念向量格式: legacy (旧格式, item["concept"]), typed (新格式, level_probs+concept_types)')
 
     # 模型类型
-    parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'simple_mlp', 'form_conditioned_mlp', 'form_conditioned_simple_mlp'], help='模型类型: mlp (门控MLP), simple_mlp (无门控MLP), form_conditioned_mlp (Form条件化门控MLP), form_conditioned_simple_mlp (Form条件化偏置MLP)')
+    parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'simple_mlp', 'form_conditioned_mlp', 'form_conditioned_simple_mlp', 'hierarchical_type_gated_mlp', 'type_augmented_gated_mlp', 'divergence_aware_gated_mlp'], help='模型类型: mlp (门控MLP), simple_mlp (无门控MLP), form_conditioned_mlp (Form条件化门控MLP), form_conditioned_simple_mlp (Form条件化偏置MLP), hierarchical_type_gated_mlp (层次化类型门控MLP), type_augmented_gated_mlp (类型增强门控MLP), divergence_aware_gated_mlp (分歧感知门控MLP)')
 
     return parser.parse_args()
 
@@ -186,7 +186,7 @@ def load_data(config, mode):
         mode: train/test，区分加载训练或实验数据集
 
     Returns:
-        tuple: (concepts, labels) 概念向量和标签张量
+        tuple: (concepts, labels, concept_types, concept_scores) 概念向量、标签张量、概念类型列表、概念标量分数
     """
 
     if mode == "train":
@@ -210,15 +210,21 @@ def load_data(config, mode):
         feat_mode = getattr(config, 'concept_feat_mode', 'single')
 
         X, y, feature_names = extract_concept_features(data, concept_types, mode=feat_mode)
+
+        # 提取concept_scores（134维标量分数，用于分歧感知模型）
+        concept_scores = np.array([item["concept_scores"] for item in data])
+
         print(f"  [typed格式] 特征模式={feat_mode}, 特征维度={X.shape[1]} (概念数={len(concept_types)})")
-        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
+        return (torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long),
+                concept_types, torch.tensor(concept_scores, dtype=torch.float32))
     else:
         # legacy格式：直接读取concept字段
         concepts, labels = [], []
         for item in raw_data:
             concepts.append(item["concept"])
             labels.append(item["toxic"])
-        return torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long)
+        return (torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long),
+                None, None)
 
 
 def load_dual_data(config, mode):
@@ -309,7 +315,7 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
 
 
 def train(config, train_dataset, val_dataset, test_dataset,
-          model_type="mlp", form_datasets=None):
+          model_type="mlp", form_datasets=None, concept_types=None):
     """训练MLP模型。
 
     基于验证集F1进行早停和最佳模型选择，同时观察测试集F1但不参与模型筛选。
@@ -318,8 +324,9 @@ def train(config, train_dataset, val_dataset, test_dataset,
     :param train_dataset: 训练集 (sem, labels) 或 (sem, labels)
     :param val_dataset: 验证集 (sem, labels)
     :param test_dataset: 测试集 (sem, labels)，仅观察F1变化，不参与模型筛选
-    :param model_type: 模型类型 "mlp"/"simple_mlp"/"form_conditioned_mlp"/"form_conditioned_simple_mlp"
+    :param model_type: 模型类型
     :param form_datasets: form概念数据字典 {"train": tensor, "val": tensor, "test": tensor}，仅form模型使用
+    :param concept_types: 概念类型列表，仅HierarchicalTypeGatedMLP使用
     :return: (epochs, val_losses, val_f1_scores, val_precisions, val_recalls, test_f1_scores, test_losses)
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -329,6 +336,8 @@ def train(config, train_dataset, val_dataset, test_dataset,
 
     # 是否需要form特征
     is_form_model = model_type in ("form_conditioned_mlp", "form_conditioned_simple_mlp")
+    # 是否需要concept_scores（分歧感知模型）
+    is_divergence_model = model_type == "divergence_aware_gated_mlp"
 
     # 构建DataLoader
     if is_form_model:
@@ -358,7 +367,37 @@ def train(config, train_dataset, val_dataset, test_dataset,
         test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
     # 初始化模型
-    if model_type == "form_conditioned_mlp":
+    if model_type == "hierarchical_type_gated_mlp":
+        if concept_types is None:
+            raise ValueError("HierarchicalTypeGatedMLP需要concept_types参数，请使用typed格式的概念向量")
+        model = HierarchicalTypeGatedMLP(
+            in_features=in_features,
+            concept_types=concept_types,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用HierarchicalTypeGatedMLP (层次化类型门控)")
+    elif model_type == "type_augmented_gated_mlp":
+        if concept_types is None:
+            raise ValueError("TypeAugmentedGatedMLP需要concept_types参数，请使用typed格式的概念向量")
+        model = TypeAugmentedGatedMLP(
+            in_features=in_features,
+            concept_types=concept_types,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用TypeAugmentedGatedMLP (类型增强门控)")
+    elif model_type == "divergence_aware_gated_mlp":
+        if concept_types is None:
+            raise ValueError("DivergenceAwareGatedMLP需要concept_types参数，请使用typed格式的概念向量")
+        model = DivergenceAwareGatedMLP(
+            in_features=in_features,
+            concept_types=concept_types,
+            dropout_rate=config.dropout_rate,
+            hidden_features=config.hidden_features,
+        ).to(device)
+        print(f">>> 使用DivergenceAwareGatedMLP (分歧感知门控)")
+    elif model_type == "form_conditioned_mlp":
         model = FormConditionedMLP(
             in_features=in_features,
             form_dim=config.form_dim,
@@ -429,6 +468,11 @@ def train(config, train_dataset, val_dataset, test_dataset,
                 batch_sem, batch_form, batch_y = batch_sem.to(device), batch_form.to(device), batch_y.to(device)
                 optimizer.zero_grad()
                 outputs = model(batch_sem, batch_form)
+            elif is_divergence_model:
+                batch_x, batch_y, batch_cs = batch_data
+                batch_x, batch_y, batch_cs = batch_x.to(device), batch_y.to(device), batch_cs.to(device)
+                optimizer.zero_grad()
+                outputs = model(batch_x, batch_cs)
             else:
                 batch_x, batch_y = batch_data
                 batch_x, batch_y = batch_x.to(device), batch_y.to(device)
@@ -449,6 +493,11 @@ def train(config, train_dataset, val_dataset, test_dataset,
                     val_sem, val_form, val_y = batch_data
                     val_sem, val_form, val_y = val_sem.to(device), val_form.to(device), val_y.to(device)
                     val_outputs = model(val_sem, val_form)
+                    v_loss = criterion(val_outputs, val_y)
+                elif is_divergence_model:
+                    val_x, val_y, val_cs = batch_data
+                    val_x, val_y, val_cs = val_x.to(device), val_y.to(device), val_cs.to(device)
+                    val_outputs = model(val_x, val_cs)
                     v_loss = criterion(val_outputs, val_y)
                 else:
                     val_x, val_y = batch_data
@@ -474,6 +523,11 @@ def train(config, train_dataset, val_dataset, test_dataset,
                     t_sem, t_form = t_sem.to(device), t_form.to(device)
                     t_outputs = model(t_sem, t_form)
                     t_loss = criterion(t_outputs, t_y.to(device))
+                elif is_divergence_model:
+                    tx, ty, tcs = batch_data
+                    tx, tcs = tx.to(device), tcs.to(device)
+                    t_outputs = model(tx, tcs)
+                    t_loss = criterion(t_outputs, ty.to(device))
                 else:
                     tx, ty = batch_data
                     tx = tx.to(device)
@@ -483,6 +537,8 @@ def train(config, train_dataset, val_dataset, test_dataset,
                 test_preds.extend(torch.argmax(t_outputs, dim=1).cpu().numpy())
                 if is_form_model:
                     test_labels_list.extend(t_y.numpy())
+                elif is_divergence_model:
+                    test_labels_list.extend(ty.numpy())
                 else:
                     test_labels_list.extend(ty.numpy())
 
@@ -559,14 +615,23 @@ def evaluate(config, timestamp):
     is_form_model = model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp')
 
     # 加载测试数据
-    test_x, test_y = load_data(saved_config, "test")
+    test_x, test_y, concept_types_from_file, test_concept_scores = load_data(saved_config, "test")
+    # 优先使用保存的concept_types（保证与训练时一致），回退到文件中的
+    concept_types = getattr(saved_config, 'concept_types', None) or concept_types_from_file
+
+    is_divergence_model = model_type == 'divergence_aware_gated_mlp'
 
     # 构建DataLoader和模型
     if is_form_model:
         _, test_form_x, _ = load_dual_data(saved_config, "test")
         test_loader = DataLoader(
             TensorDataset(test_x, test_form_x, test_y),
-            batch_size=int(saved_config.batch_size), shuffle=False
+            batch_size=saved_config.batch_size, shuffle=False
+        )
+    elif is_divergence_model and test_concept_scores is not None:
+        test_loader = DataLoader(
+            TensorDataset(test_x, test_y, test_concept_scores),
+            batch_size=saved_config.batch_size, shuffle=False
         )
     else:
         test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=int(saved_config.batch_size), shuffle=False)
@@ -596,7 +661,28 @@ def evaluate(config, timestamp):
             adjective_chinese.append(row[1] if len(row) > 1 else row[0])
 
     # 加载最佳模型
-    if model_type == 'form_conditioned_mlp':
+    if model_type == 'hierarchical_type_gated_mlp':
+        model = HierarchicalTypeGatedMLP(
+            in_features=test_x.shape[1],
+            concept_types=concept_types,
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
+    elif model_type == 'type_augmented_gated_mlp':
+        model = TypeAugmentedGatedMLP(
+            in_features=test_x.shape[1],
+            concept_types=concept_types,
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
+    elif model_type == 'divergence_aware_gated_mlp':
+        model = DivergenceAwareGatedMLP(
+            in_features=test_x.shape[1],
+            concept_types=concept_types,
+            dropout_rate=saved_config.dropout_rate,
+            hidden_features=saved_config.hidden_features,
+        )
+    elif model_type == 'form_conditioned_mlp':
         model = FormConditionedMLP(
             in_features=test_x.shape[1],
             form_dim=getattr(saved_config, 'form_dim', 10),
@@ -724,6 +810,9 @@ def main():
         # 是否需要form特征
         is_form_model = config.model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp')
 
+        # concept_types仅在非form模型时从load_data获取
+        concept_types = None
+
         # 保存完整配置到config.json
         config_dict = {
             # 实验元信息
@@ -761,6 +850,7 @@ def main():
             "hidden_features": config.hidden_features,
             "patience": config.patience,
             "form_dim": config.form_dim,
+            "concept_types": concept_types,
         }
 
         # Form-Conditioned额外路径
@@ -800,30 +890,52 @@ def main():
                 "test": test_form,
             }
         else:
-            train_x, train_y = load_data(config, "train")
-            test_x, test_y = load_data(config, "test")
+            train_x, train_y, concept_types, train_concept_scores = load_data(config, "train")
+            test_x, test_y, _, test_concept_scores = load_data(config, "test")
 
             # 从训练集中按9:1比例划分验证集（分层抽样）
-            train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
-                train_x.numpy(), train_y.numpy(),
-                test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
-            )
-            train_dataset = TensorDataset(
-                torch.tensor(train_x_np, dtype=torch.float32),
-                torch.tensor(train_y_np, dtype=torch.long)
-            )
-            val_dataset = TensorDataset(
-                torch.tensor(val_x_np, dtype=torch.float32),
-                torch.tensor(val_y_np, dtype=torch.long)
-            )
-            test_dataset = TensorDataset(test_x, test_y)
+            is_divergence_model = config.model_type == 'divergence_aware_gated_mlp'
+
+            if is_divergence_model and train_concept_scores is not None:
+                # 分歧感知模型：concept_scores也需要同步划分
+                train_x_np, val_x_np, train_y_np, val_y_np, train_cs_np, val_cs_np = train_test_split(
+                    train_x.numpy(), train_y.numpy(), train_concept_scores.numpy(),
+                    test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
+                )
+                train_dataset = TensorDataset(
+                    torch.tensor(train_x_np, dtype=torch.float32),
+                    torch.tensor(train_y_np, dtype=torch.long),
+                    torch.tensor(train_cs_np, dtype=torch.float32),
+                )
+                val_dataset = TensorDataset(
+                    torch.tensor(val_x_np, dtype=torch.float32),
+                    torch.tensor(val_y_np, dtype=torch.long),
+                    torch.tensor(val_cs_np, dtype=torch.float32),
+                )
+                test_dataset = TensorDataset(test_x, test_y, test_concept_scores)
+            else:
+                # 标准模型：不需要concept_scores
+                train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
+                    train_x.numpy(), train_y.numpy(),
+                    test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
+                )
+                train_dataset = TensorDataset(
+                    torch.tensor(train_x_np, dtype=torch.float32),
+                    torch.tensor(train_y_np, dtype=torch.long)
+                )
+                val_dataset = TensorDataset(
+                    torch.tensor(val_x_np, dtype=torch.float32),
+                    torch.tensor(val_y_np, dtype=torch.long)
+                )
+                test_dataset = TensorDataset(test_x, test_y)
             form_datasets = None
 
         print(f">>> 训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
 
         # 训练并获取指标
         metrics = train(config, train_dataset, val_dataset, test_dataset,
-                        model_type=config.model_type, form_datasets=form_datasets)
+                        model_type=config.model_type, form_datasets=form_datasets,
+                        concept_types=concept_types)
 
         # 绘制训练曲线图
         plot_metrics(config, *metrics)

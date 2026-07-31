@@ -35,7 +35,7 @@ class MLPConfig():
         # "single": 二元用P(2), 3级用P(3) → 每概念1维
         # "conditional": 二元用P(2), 3级用[P(3), P(3)/(P(2)+P(3))] → 二元1维, 3级2维
         # "all_probs": 二元用[P(1),P(2)], 3级用[P(1),P(2),P(3)] → 二元2维, 3级3维
-        self.concept_feat_mode = "single"
+        self.concept_feat_mode = "conditional"
 
         # ========== Form-Conditioned Gate 配置 ==========
         self.form_dim = 10  # 文本形式特征维度
