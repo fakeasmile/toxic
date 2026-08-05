@@ -92,18 +92,20 @@ def extract_contrast_snr_features(data, concept_types, snr_weights):
         y[si] = item["toxic"]
     snr_w = np.clip(snr_weights, 0, None) + 0.01
     weighted_contrast = (p3_arr - p2_arr) * snr_w
-    n_types, n_s = len(type_names), 6
-    summary = np.zeros((n_samples, n_types * n_s))
-    for si in range(n_samples):
-        for ti, t in enumerate(type_names):
-            idx, b = type_indices[t], ti * n_s
-            summary[si, b+0] = np.mean(p3_arr[si, idx])
-            summary[si, b+1] = np.mean(p2_arr[si, idx])
-            summary[si, b+2] = np.mean(weighted_contrast[si, idx])
-            summary[si, b+3] = np.max(p3_arr[si, idx])
-            summary[si, b+4] = np.max(weighted_contrast[si, idx])
-            summary[si, b+5] = float(np.sum((weighted_contrast[si, idx] > 0) & (snr_w[idx] > 0.05)))
-    X = np.concatenate([p3_arr, p2_arr, weighted_contrast, summary], axis=1)
+    # ===== [消融实验] 类型级聚合特征 summary 已注释 =====
+    # n_types, n_s = len(type_names), 6
+    # summary = np.zeros((n_samples, n_types * n_s))
+    # for si in range(n_samples):
+    #     for ti, t in enumerate(type_names):
+    #         idx, b = type_indices[t], ti * n_s
+    #         summary[si, b+0] = np.mean(p3_arr[si, idx])
+    #         summary[si, b+1] = np.mean(p2_arr[si, idx])
+    #         summary[si, b+2] = np.mean(weighted_contrast[si, idx])
+    #         summary[si, b+3] = np.max(p3_arr[si, idx])
+    #         summary[si, b+4] = np.max(weighted_contrast[si, idx])
+    #         summary[si, b+5] = float(np.sum((weighted_contrast[si, idx] > 0) & (snr_w[idx] > 0.05)))
+    # X = np.concatenate([p3_arr, p2_arr, weighted_contrast, summary], axis=1)
+    X = np.concatenate([p3_arr, p2_arr, weighted_contrast], axis=1)
     return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
 
@@ -246,7 +248,7 @@ def main():
     with open(config.raw_data_path / "adjective" / "toxic_adjectives_v2_types.json", encoding="utf-8") as f:
         concept_types = [i["type"] for i in json.load(f)]
     snr = compute_concept_snr(train_data, n_concepts)
-    nc, ns = 3, len(set(concept_types)) * 6
+    nc, ns = 3, 0  # [消融实验] ns=0: 不使用类型级聚合特征(summary)，特征维度降至 396
     tr_X, tr_y = extract_contrast_snr_features(train_data, concept_types, snr)
     te_X, te_y = extract_contrast_snr_features(test_data, concept_types, snr)
     n_feat = tr_X.shape[1]
