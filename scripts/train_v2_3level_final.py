@@ -1,28 +1,23 @@
-"""v2 3level 概念向量下游分类器 — 最终论文版本。
+"""v2 3level 概念向量下游分类器 — 论文 ACV-FSCBM 版本。
 
-论文核心贡献：
-  - 3级行为锚定提示词（不相关→涉及→实施）：解决"讨论有毒行为"vs"实施有毒行为"的语义区分
-  - SNR 概念质量审计：发现132概念中28个(21%)有害，指导特征工程
-  - contrast_snr 特征模式：P3+P2+SNR加权(P3-P2)，提取"实施超出涉及"信号
-  - 类型感知门控：矩阵门控建模概念交互 + 类型汇总bypass保持全局视角
+对应论文 2.3 节"门控概念分类器"：
+  等级特征向量构造：实施概率 m^{(3)} + 涉及概率 m^{(2)} + SNR加权差值 (m^{(3)}-m^{(2)})⊙w
+  门控多层感知机：矩阵门控 → Dropout → FC(96) → ReLU → Dropout → FC(2)
 
-最终配置：
-    特征模式: contrast_snr（426d）
-    训练策略: label_smoothing=0.05 + EMA(decay=0.999)
-    模型架构: P2SignalAugmentedGatedMLP (矩阵门控 396² + 类型汇总30d)
+训练策略：label_smoothing=0.05 + EMA(decay=0.999) + AdamW + OneCycleLR
+模型架构：GatedConceptClassifier（全矩阵门控 396×396 + 两层全连接）
 
-SNR计算注记: SNR作为特征工程参数从全训练集估计(9600样本)，不参与梯度优化。
-                此做法等价于StandardScaler.fit(train_data)，不属于数据泄露。
+SNR计算注记：SNR作为特征工程参数从全训练集估计（9600样本），不参与梯度优化。
+                此做法等价于 StandardScaler.fit(train_data)，不属于数据泄露。
 
 -- 快速上手 --
 # 搜索好种子（30个种子，每个训练一次，从 summary.json 找 best）
 python scripts/train_v2_3level_final.py --dataset_name TOXICN --model_name glm-4-9b-chat --n_seeds 30
 
-# 复现最佳种子（seed=42 → seed=42这个split → 权重用42初始化 → 结果确定可复现）
+# 复现最佳种子
 python scripts/train_v2_3level_final.py --dataset_name TOXICN --model_name glm-4-9b-chat --seed 42
 
-种子逻辑：1个种子 = 1次split + 1次训练 = 1个结果。搜索就是跑N个种子。
-"""
+种子逻辑：1个种子 = 1次split + 1次训练 = 1个结果。搜索就是跑N个种子。"""
 
 import argparse, json, random, os, sys
 from pathlib import Path
@@ -59,9 +54,22 @@ def worker_init_fn(worker_id):
     random.seed(torch.initial_seed() % 2**32)
 
 
-class P2SignalAugmentedGatedMLP(nn.Module):
+class GatedConceptClassifier(nn.Module):
+    """门控概念分类器（对应论文 2.3 节）。
+
+    输入等级特征向量 x = [p^{(3)}; p^{(2)}; d̃] ∈ R^{3l}，
+    经矩阵门控自适应加权后，由两层全连接网络映射至标签空间。
+
+    Args:
+        n_concepts: 概念数量 l（v2 词典为 132）
+        concept_types: 概念类型列表（保留参数，当前未使用）
+        dropout_rate: Dropout 比率
+        hidden_features: 隐藏层维度 d_h
+        n_summary: 类型级汇总特征维度（保留参数，当前为 0）
+        n_main_channels: 主特征通道数（默认 3 路：P3+P2+加权差值）
+    """
     def __init__(self, n_concepts, concept_types, dropout_rate=0.5,
-                 hidden_features=96, n_summary=30, n_main_channels=3):
+                 hidden_features=96, n_summary=0, n_main_channels=3):
         super().__init__()
         self.main_dim = n_concepts * n_main_channels
         self.gate_layer = nn.Linear(self.main_dim, self.main_dim)
@@ -77,7 +85,7 @@ class P2SignalAugmentedGatedMLP(nn.Module):
         return self.fc2(self.dropout(h))
 
 
-def extract_contrast_snr_features(data, concept_types, snr_weights):
+def extract_level_features(data, concept_types, snr_weights):
     n_samples, n_concepts = len(data), len(data[0]["concept"])
     type_names = sorted(set(concept_types))
     type_indices = {t: [i for i, ct in enumerate(concept_types) if ct == t]
@@ -135,7 +143,7 @@ def train_one_seed(train_X, train_y, test_X, test_y, concept_types,
     val_loader = DataLoader(TensorDataset(va_X, va_y), batch_size=config.batch_size)
     test_loader = DataLoader(TensorDataset(test_X, test_y), batch_size=config.batch_size)
 
-    model = P2SignalAugmentedGatedMLP(
+    model = GatedConceptClassifier(
         n_concepts, concept_types, config.dropout_rate, config.hidden_features,
         n_summary, n_main_channels).to(device)
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
@@ -164,13 +172,13 @@ def train_one_seed(train_X, train_y, test_X, test_y, concept_types,
             for bx, by in val_loader:
                 vp.extend(torch.argmax(ev(bx.to(device)), 1).cpu().numpy())
                 vl.extend(by.numpy())
-        vf = f1_score(vl, vp, average='weighted')
+        vf = f1_score(vl, vp, average='macro')
         tp, tl = [], []
         with torch.no_grad():
             for bx, by in test_loader:
                 tp.extend(torch.argmax(ev(bx.to(device)), 1).cpu().numpy())
                 tl.extend(by.numpy())
-        tf_ = f1_score(tl, tp, average='weighted')
+        tf_ = f1_score(tl, tp, average='macro')
         hist_v.append(vf); hist_t.append(tf_)
         pbar.set_postfix({'val': f'{vf:.4f}', 'test': f'{tf_:.4f}', 'best': f'{best_val:.4f}'})
         if vf > best_val:
@@ -188,9 +196,9 @@ def train_one_seed(train_X, train_y, test_X, test_y, concept_types,
         for bx, by in test_loader:
             ap.extend(torch.argmax(model(bx.to(device)), 1).cpu().numpy())
             al.extend(by.numpy())
-    tf = f1_score(al, ap, average='weighted')
-    tp = precision_score(al, ap, average='weighted', zero_division=0)
-    tr = recall_score(al, ap, average='weighted', zero_division=0)
+    tf = f1_score(al, ap, average='macro')
+    tp = precision_score(al, ap, average='macro', zero_division=0)
+    tr = recall_score(al, ap, average='macro', zero_division=0)
     nr = recall_score(al, ap, labels=[0], average=None)[0]
     xr = recall_score(al, ap, labels=[1], average=None)[0]
     cr = classification_report(al, ap, target_names=["Non-Toxic", "Toxic"])
@@ -210,7 +218,7 @@ def plot_metrics(out_dir, hist_v, hist_t):
 
 def save_seed_result(out_dir, r, seed, args, n_concepts, n_features, use_ema):
     out_dir.mkdir(parents=True, exist_ok=True)
-    cfg = {"pipeline": "v2_3level_final", "feature_mode": "contrast_snr",
+    cfg = {"pipeline": "v2_3level_final", "feature_mode": "level_features",
            "seed": seed, "n_concepts": n_concepts, "n_features": n_features,
            "label_smoothing": args.label_smoothing,
            "use_ema": use_ema, "ema_decay": args.ema_decay if use_ema else None,
@@ -249,8 +257,8 @@ def main():
         concept_types = [i["type"] for i in json.load(f)]
     snr = compute_concept_snr(train_data, n_concepts)
     nc, ns = 3, 0  # [消融实验] ns=0: 不使用类型级聚合特征(summary)，特征维度降至 396
-    tr_X, tr_y = extract_contrast_snr_features(train_data, concept_types, snr)
-    te_X, te_y = extract_contrast_snr_features(test_data, concept_types, snr)
+    tr_X, tr_y = extract_level_features(train_data, concept_types, snr)
+    te_X, te_y = extract_level_features(test_data, concept_types, snr)
     n_feat = tr_X.shape[1]
     print(f">>> 特征: {n_feat}d LS={args.label_smoothing} EMA={'on' if use_ema else 'off'}")
 
@@ -285,7 +293,7 @@ def main():
     print(f">>> 复现: --seed {best['seed']}")
 
     summary = {"timestamp": ts, "n_seeds": len(seeds),
-               "feature_mode": "contrast_snr", "label_smoothing": args.label_smoothing,
+               "feature_mode": "level_features", "label_smoothing": args.label_smoothing,
                "use_ema": use_ema, "n_concepts": n_concepts, "n_features": n_feat,
                "results": [{"seed": r['seed'], "test_f1": round(r['test_f1'], 4),
                             "val_f1": round(r['val_f1'], 4)} for r in all_r]}
