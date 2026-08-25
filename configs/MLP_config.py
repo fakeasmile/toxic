@@ -37,9 +37,8 @@ class MLPConfig():
         # "all_probs": 二元用[P(1),P(2)], 3级用[P(1),P(2),P(3)] → 二元2维, 3级3维
         self.concept_feat_mode = "conditional"
 
-        # ========== Form-Conditioned Gate 配置 ==========
-        self.form_dim = 10  # 文本形式特征维度
-        self.model_type = "mlp"  # 模型类型: "mlp" 或 "form_conditioned_mlp"
+        # ========== 模型类型配置 ==========
+        self.model_type = "mlp"  # 模型类型: "mlp" (门控MLP) 或 "type_augmented_gated_mlp" (类型增强门控MLP)
 
     def __repr__(self):
         """返回配置对象的字符串表示，包含所有配置项"""

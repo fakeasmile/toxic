@@ -36,4 +36,3 @@ def set_reproducibility(config):
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
         torch.use_deterministic_algorithms(False)
-        print(">>> 已关闭确定性模式 (Random Mode Enabled)")

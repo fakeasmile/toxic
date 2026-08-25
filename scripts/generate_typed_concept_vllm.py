@@ -57,10 +57,6 @@ def parse_args():
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
     parser.add_argument('--adjective_name', type=str, default='toxic_adjectives_v4.csv',
                         help='概念词典文件名，默认toxic_adjectives_v4.csv')
-    parser.add_argument('--data_file', type=str, default=None,
-                        help='自定义数据文件名（如train_100.json），默认根据mode自动选择')
-    parser.add_argument('--num_samples', type=int, default=0,
-                        help='快速验证用，0=全量')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.85,
                         help='vLLM GPU显存占用比例（0.0-1.0），默认0.85')
     return parser.parse_args()
@@ -395,8 +391,7 @@ def build_prompt(content, concept):
 # =============================================================================
 def generate_typed_concept(data_path, output_path, adjective_path,
                            tokenizer, llm_model,
-                           is_qwen3=False, prompt_suffix="",
-                           num_samples=0):
+                           is_qwen3=False, prompt_suffix=""):
     """生成类型感知概念向量。
 
     对数据集中每条文本，遍历所有概念，根据概念类型使用不同的提示词和verbalizer，
@@ -426,9 +421,6 @@ def generate_typed_concept(data_path, output_path, adjective_path,
     # 加载数据集
     with open(data_path, "r", encoding="utf-8") as f:
         data_set = json.load(f)
-    if num_samples > 0:
-        data_set = data_set[:num_samples]
-        print(f"快速验证模式: 使用前{num_samples}条样本")
     print(f"数据集大小: {len(data_set)}条")
 
     # 推理配置
@@ -555,10 +547,7 @@ def main():
 
     # 构建路径
     data_dir = config.raw_data_path / args.dataset_name
-    if args.data_file:
-        data_path = data_dir / args.data_file
-    else:
-        data_path = data_dir / f"{args.mode}.json"
+    data_path = data_dir / f"{args.mode}.json"
 
     adjective_path = config.raw_data_path / "adjective" / args.adjective_name
     if not adjective_path.exists():
@@ -600,7 +589,6 @@ def main():
         data_path, output_path, adjective_path,
         tokenizer, llm_model,
         is_qwen3=qwen3_flag, prompt_suffix=prompt_suffix,
-        num_samples=args.num_samples,
     )
 
     print("生成完成")

@@ -93,24 +93,3 @@ def extract_concept_features(data, concept_types, mode="conditional"):
     y = np.array([item["toxic"] for item in data])
 
     return X, y, feature_names
-
-
-def get_feature_dim(concept_types, mode="conditional"):
-    """计算给定概念类型和模式下的特征维度。"""
-    dim = 0
-    for ptype in concept_types:
-        if ptype in THREE_LEVEL_TYPES:
-            if mode == "single":
-                dim += 1
-            elif mode == "conditional":
-                dim += 2
-            elif mode == "all_probs":
-                dim += 3
-        else:
-            if mode == "single":
-                dim += 1
-            elif mode == "conditional":
-                dim += 1
-            elif mode == "all_probs":
-                dim += 2
-    return dim

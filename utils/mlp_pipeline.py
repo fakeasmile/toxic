@@ -15,7 +15,7 @@
     --timestamp         测试模式时的实验时间戳 (如: 20260415-085433)
     --dataset_name      数据集名称 (TOXICN/COLD), 必填
     --model_name        LLM模型名称, 必填
-    --concept_type      概念向量类型: likert (默认) 或 binary
+    --model_type        模型类型: mlp (门控MLP, 默认) 或 type_augmented_gated_mlp (类型增强门控MLP)
 
 超参数配置:
     所有训练超参数（学习率、批次大小、epoch数、dropout等）均在 MLP_config.py 中配置。
@@ -32,7 +32,7 @@
             └── predictions.json     # 逐条预测结果
 
 注意事项:
-    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_adjective_c_r_vllm.py)
+    1. 运行前需确保已生成概念向量文件 (使用scripts/generate_typed_concept_vllm.py)
     2. 测试模式必须指定有效的实验时间戳
 """
 
@@ -42,7 +42,6 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -58,7 +57,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from configs.MLP_config import MLPConfig
-from models.mlp import MLP, FormConditionedMLP, SimpleMLP, FormConditionedSimpleMLP, HierarchicalTypeGatedMLP, TypeAugmentedGatedMLP, DivergenceAwareGatedMLP
+from models.mlp import MLP, TypeAugmentedGatedMLP
 from utils.concept_features import extract_concept_features
 
 # 配置中文字体
@@ -94,20 +93,11 @@ def parse_args():
     parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称 (TOXICN/COLD)')
     parser.add_argument('--model_name', type=str, required=True, help='LLM模型名称')
 
-    # 概念向量类型
-    parser.add_argument('--concept_type', type=str, default='likert', choices=['likert', 'binary'], help='概念向量类型: likert (相关度), binary (是否评分)')
-
     # 形容词词典
-    parser.add_argument('--adjective_name', type=str, default=None, help='形容词词典文件名（如toxic_adjectives_v2.csv），默认使用MLP_config.py中的adjective_path')
-
-    # 概念向量后缀（用于SNR加权等变体）
-    parser.add_argument('--concept_suffix', type=str, default=None, help='概念向量文件额外后缀 (如 _snr_weighted)')
-
-    # 概念向量格式
-    parser.add_argument('--concept_format', type=str, default='typed', choices=['legacy', 'typed'], help='概念向量格式: legacy (旧格式, item["concept"]), typed (新格式, level_probs+concept_types)')
+    parser.add_argument('--adjective_name', type=str, default=None, help='形容词词典文件名（如toxic_adjectives_v4.csv），默认使用MLP_config.py中的adjective_path')
 
     # 模型类型
-    parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'simple_mlp', 'form_conditioned_mlp', 'form_conditioned_simple_mlp', 'hierarchical_type_gated_mlp', 'type_augmented_gated_mlp', 'divergence_aware_gated_mlp'], help='模型类型: mlp (门控MLP), simple_mlp (无门控MLP), form_conditioned_mlp (Form条件化门控MLP), form_conditioned_simple_mlp (Form条件化偏置MLP), hierarchical_type_gated_mlp (层次化类型门控MLP), type_augmented_gated_mlp (类型增强门控MLP), divergence_aware_gated_mlp (分歧感知门控MLP)')
+    parser.add_argument('--model_type', type=str, default='mlp', choices=['mlp', 'type_augmented_gated_mlp'], help='模型类型: mlp (门控MLP, 默认), type_augmented_gated_mlp (类型增强门控MLP)')
 
     return parser.parse_args()
 
@@ -120,54 +110,22 @@ def update_MLPConfig(args):
     mlp_config.dataset_name = args.dataset_name
     mlp_config.model_name = args.model_name
 
-    # 动态生成依赖 dataset_name/model_name 的路径
-    concept_type = getattr(args, 'concept_type', 'likert')
-
     # 形容词词典路径：命令行指定 > MLP_config.py默认值
     if getattr(args, 'adjective_name', None) is not None:
         mlp_config.adjective_path = mlp_config.raw_data_path / "adjective" / args.adjective_name
 
-    # 构建文件名后缀：形容词词典版本 + concept_type后缀 + concept_suffix
+    # 构建文件名后缀：类型感知(typed)概念向量格式，格式为 _typed_{词典版本}
     adj_stem = mlp_config.adjective_path.stem  # toxic_adjectives_v4
     adj_version = adj_stem.replace("toxic_adjectives_", "")  # v4
-    concept_format = getattr(args, 'concept_format', 'legacy')
-    if concept_format == 'typed':
-        suffix = f"_typed_{adj_version}"
-    else:
-        suffix = f"_{adj_version}"
-    if concept_type == 'binary':
-        suffix += '_binary'
-    if getattr(args, 'concept_suffix', None):
-        suffix += f"_{args.concept_suffix}"  # e.g., _snr_weighted
+    suffix = f"_typed_{adj_version}"
 
     mlp_config.train_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                      / mlp_config.model_name / f"concept_train_{mlp_config.model_name}{suffix}.json")
     mlp_config.test_concept_path = (mlp_config.processed_path / mlp_config.dataset_name
                                     / mlp_config.model_name / f"concept_test_{mlp_config.model_name}{suffix}.json")
 
-    mlp_config.concept_type = concept_type
-    mlp_config.concept_format = concept_format
-
     # 模型类型
     mlp_config.model_type = args.model_type
-
-    # Form-Conditioned Gate: 自动推导form概念向量路径
-    if args.model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp'):
-        mlp_config.train_form_concept_path = (
-            mlp_config.processed_path / mlp_config.dataset_name
-            / mlp_config.model_name
-            / f"concept_train_{mlp_config.model_name}_text_form.json"
-        )
-        mlp_config.test_form_concept_path = (
-            mlp_config.processed_path / mlp_config.dataset_name
-            / mlp_config.model_name
-            / f"concept_test_{mlp_config.model_name}_text_form.json"
-        )
-        # 检查form概念文件是否存在
-        if not mlp_config.train_form_concept_path.exists():
-            raise FileNotFoundError(f"训练集form概念文件不存在: {mlp_config.train_form_concept_path}")
-        if not mlp_config.test_form_concept_path.exists():
-            raise FileNotFoundError(f"测试集form概念文件不存在: {mlp_config.test_form_concept_path}")
 
     return mlp_config
 
@@ -175,18 +133,15 @@ def update_MLPConfig(args):
 def load_data(config, mode):
     """加载指定训练或测试的概念向量和标签。
 
-    支持两种概念向量JSON格式：
-    - legacy格式：扁平列表 [{content, toxic, concept: [float]}, ...]
-    - typed格式：嵌套结构 {meta: {concept_types: [...]}, data: [{content, toxic, concept_scores, level_probs}]}
-
-    typed格式使用 concept_features.py 提取特征，支持 single/conditional/all_probs 三种模式。
+    概念向量为 typed 格式：{meta: {concept_types: [...]}, data: [{content, toxic, concept_scores, level_probs}]}
+    使用 concept_features.py 提取特征，支持 single/conditional/all_probs 三种模式。
 
     Args:
-        config: 配置文件（含concept_type, concept_format, concept_feat_mode字段）
+        config: 配置文件（含concept_feat_mode字段）
         mode: train/test，区分加载训练或实验数据集
 
     Returns:
-        tuple: (concepts, labels, concept_types, concept_scores) 概念向量、标签张量、概念类型列表、概念标量分数
+        tuple: (concepts, labels, concept_types) 概念向量、标签张量、概念类型列表
     """
 
     if mode == "train":
@@ -199,76 +154,17 @@ def load_data(config, mode):
     with open(concept_path, "r", encoding="utf-8") as f:
         raw_data = json.load(f)
 
-    # 检测格式：typed格式有meta和data键，legacy格式是扁平列表
-    concept_format = getattr(config, 'concept_format', 'legacy')
+    # typed格式：使用concept_features.py提取特征
+    meta = raw_data['meta']
+    data = raw_data['data']
+    concept_types = meta['concept_types']
+    feat_mode = getattr(config, 'concept_feat_mode', 'single')
 
-    if concept_format == 'typed' or (isinstance(raw_data, dict) and 'meta' in raw_data and 'data' in raw_data):
-        # typed格式：使用concept_features.py提取特征
-        meta = raw_data['meta']
-        data = raw_data['data']
-        concept_types = meta['concept_types']
-        feat_mode = getattr(config, 'concept_feat_mode', 'single')
+    X, y, feature_names = extract_concept_features(data, concept_types, mode=feat_mode)
 
-        X, y, feature_names = extract_concept_features(data, concept_types, mode=feat_mode)
-
-        # 提取concept_scores（134维标量分数，用于分歧感知模型）
-        concept_scores = np.array([item["concept_scores"] for item in data])
-
-        print(f"  [typed格式] 特征模式={feat_mode}, 特征维度={X.shape[1]} (概念数={len(concept_types)})")
-        return (torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long),
-                concept_types, torch.tensor(concept_scores, dtype=torch.float32))
-    else:
-        # legacy格式：直接读取concept字段
-        concepts, labels = [], []
-        for item in raw_data:
-            concepts.append(item["concept"])
-            labels.append(item["toxic"])
-        return (torch.tensor(concepts, dtype=torch.float32), torch.tensor(labels, dtype=torch.long),
-                None, None)
-
-
-def load_dual_data(config, mode):
-    """同时加载语义概念向量和文本形式概念向量。
-
-    两个文件样本顺序完全一致，按索引对齐。
-
-    Args:
-        config: 配置文件（含train/test_form_concept_path字段）
-        mode: train/test
-
-    Returns:
-        tuple: (sem_concepts, form_concepts, labels) 三个张量
-    """
-    if mode == "train":
-        sem_path = config.train_concept_path
-        form_path = config.train_form_concept_path
-    elif mode == "test":
-        sem_path = config.test_concept_path
-        form_path = config.test_form_concept_path
-    else:
-        raise ValueError("mode must be 'train' or 'test'")
-
-    with open(sem_path, "r", encoding="utf-8") as f:
-        sem_data = json.load(f)
-    with open(form_path, "r", encoding="utf-8") as f:
-        form_data = json.load(f)
-
-    assert len(sem_data) == len(form_data), \
-        f"语义文件({len(sem_data)})与form文件({len(form_data)})样本数不一致"
-
-    sem_concepts, form_concepts, labels = [], [], []
-    for i in range(len(sem_data)):
-        assert sem_data[i]["content"] == form_data[i]["content"], \
-            f"第{i}条样本content不一致"
-        assert sem_data[i]["toxic"] == form_data[i]["toxic"], \
-            f"第{i}条样本toxic标签不一致"
-        sem_concepts.append(sem_data[i]["concept"])
-        form_concepts.append(form_data[i]["concept"])
-        labels.append(sem_data[i]["toxic"])
-
-    return (torch.tensor(sem_concepts, dtype=torch.float32),
-            torch.tensor(form_concepts, dtype=torch.float32),
-            torch.tensor(labels, dtype=torch.long))
+    print(f"  [typed格式] 特征模式={feat_mode}, 特征维度={X.shape[1]} (概念数={len(concept_types)})")
+    return (torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long),
+            concept_types)
 
 
 def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_recalls,
@@ -315,18 +211,17 @@ def plot_metrics(config, epochs, val_losses, val_f1_scores, val_precisions, val_
 
 
 def train(config, train_dataset, val_dataset, test_dataset,
-          model_type="mlp", form_datasets=None, concept_types=None):
+          model_type="mlp", concept_types=None):
     """训练MLP模型。
 
     基于验证集F1进行早停和最佳模型选择，同时观察测试集F1但不参与模型筛选。
 
     :param config: MLPConfig 配置对象
-    :param train_dataset: 训练集 (sem, labels) 或 (sem, labels)
-    :param val_dataset: 验证集 (sem, labels)
-    :param test_dataset: 测试集 (sem, labels)，仅观察F1变化，不参与模型筛选
-    :param model_type: 模型类型
-    :param form_datasets: form概念数据字典 {"train": tensor, "val": tensor, "test": tensor}，仅form模型使用
-    :param concept_types: 概念类型列表，仅HierarchicalTypeGatedMLP使用
+    :param train_dataset: 训练集 (x, labels)
+    :param val_dataset: 验证集 (x, labels)
+    :param test_dataset: 测试集 (x, labels)，仅观察F1变化，不参与模型筛选
+    :param model_type: 模型类型 (mlp / type_augmented_gated_mlp)
+    :param concept_types: 概念类型列表，仅TypeAugmentedGatedMLP使用
     :return: (epochs, val_losses, val_f1_scores, val_precisions, val_recalls, test_f1_scores, test_losses)
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -334,50 +229,13 @@ def train(config, train_dataset, val_dataset, test_dataset,
 
     in_features = train_dataset[0][0].shape[0]
 
-    # 是否需要form特征
-    is_form_model = model_type in ("form_conditioned_mlp", "form_conditioned_simple_mlp")
-    # 是否需要concept_scores（分歧感知模型）
-    is_divergence_model = model_type == "divergence_aware_gated_mlp"
-
     # 构建DataLoader
-    if is_form_model:
-        train_sem, train_y = train_dataset.tensors
-        val_sem, val_y = val_dataset.tensors
-        test_sem, test_y = test_dataset.tensors
-
-        train_form = form_datasets["train"]
-        val_form = form_datasets["val"]
-        test_form = form_datasets["test"]
-
-        train_loader = DataLoader(
-            TensorDataset(train_sem, train_form, train_y),
-            batch_size=config.batch_size, shuffle=True
-        )
-        val_loader = DataLoader(
-            TensorDataset(val_sem, val_form, val_y),
-            batch_size=config.batch_size, shuffle=False
-        )
-        test_loader = DataLoader(
-            TensorDataset(test_sem, test_form, test_y),
-            batch_size=config.batch_size, shuffle=False
-        )
-    else:
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
-        test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
     # 初始化模型
-    if model_type == "hierarchical_type_gated_mlp":
-        if concept_types is None:
-            raise ValueError("HierarchicalTypeGatedMLP需要concept_types参数，请使用typed格式的概念向量")
-        model = HierarchicalTypeGatedMLP(
-            in_features=in_features,
-            concept_types=concept_types,
-            dropout_rate=config.dropout_rate,
-            hidden_features=config.hidden_features,
-        ).to(device)
-        print(f">>> 使用HierarchicalTypeGatedMLP (层次化类型门控)")
-    elif model_type == "type_augmented_gated_mlp":
+    if model_type == "type_augmented_gated_mlp":
         if concept_types is None:
             raise ValueError("TypeAugmentedGatedMLP需要concept_types参数，请使用typed格式的概念向量")
         model = TypeAugmentedGatedMLP(
@@ -387,39 +245,6 @@ def train(config, train_dataset, val_dataset, test_dataset,
             hidden_features=config.hidden_features,
         ).to(device)
         print(f">>> 使用TypeAugmentedGatedMLP (类型增强门控)")
-    elif model_type == "divergence_aware_gated_mlp":
-        if concept_types is None:
-            raise ValueError("DivergenceAwareGatedMLP需要concept_types参数，请使用typed格式的概念向量")
-        model = DivergenceAwareGatedMLP(
-            in_features=in_features,
-            concept_types=concept_types,
-            dropout_rate=config.dropout_rate,
-            hidden_features=config.hidden_features,
-        ).to(device)
-        print(f">>> 使用DivergenceAwareGatedMLP (分歧感知门控)")
-    elif model_type == "form_conditioned_mlp":
-        model = FormConditionedMLP(
-            in_features=in_features,
-            form_dim=config.form_dim,
-            dropout_rate=config.dropout_rate,
-            hidden_features=config.hidden_features,
-        ).to(device)
-        print(f">>> 使用FormConditionedMLP (Form条件化门控)")
-    elif model_type == "form_conditioned_simple_mlp":
-        model = FormConditionedSimpleMLP(
-            in_features=in_features,
-            form_dim=config.form_dim,
-            dropout_rate=config.dropout_rate,
-            hidden_features=config.hidden_features,
-        ).to(device)
-        print(f">>> 使用FormConditionedSimpleMLP (Form条件化偏置)")
-    elif model_type == "simple_mlp":
-        model = SimpleMLP(
-            in_features=in_features,
-            dropout_rate=config.dropout_rate,
-            hidden_features=config.hidden_features,
-        ).to(device)
-        print(f">>> 使用SimpleMLP (无门控)")
     else:
         model = MLP(
             in_features=in_features,
@@ -462,22 +287,10 @@ def train(config, train_dataset, val_dataset, test_dataset,
     for epoch in range(config.epochs):
         # ========== 训练阶段 ==========
         model.train()
-        for batch_data in train_loader:
-            if is_form_model:
-                batch_sem, batch_form, batch_y = batch_data
-                batch_sem, batch_form, batch_y = batch_sem.to(device), batch_form.to(device), batch_y.to(device)
-                optimizer.zero_grad()
-                outputs = model(batch_sem, batch_form)
-            elif is_divergence_model:
-                batch_x, batch_y, batch_cs = batch_data
-                batch_x, batch_y, batch_cs = batch_x.to(device), batch_y.to(device), batch_cs.to(device)
-                optimizer.zero_grad()
-                outputs = model(batch_x, batch_cs)
-            else:
-                batch_x, batch_y = batch_data
-                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-                optimizer.zero_grad()
-                outputs = model(batch_x)
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            optimizer.zero_grad()
+            outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
@@ -488,25 +301,13 @@ def train(config, train_dataset, val_dataset, test_dataset,
         val_preds, val_labels_list = [], []
         total_val_loss = 0.0
         with torch.no_grad():
-            for batch_data in val_loader:
-                if is_form_model:
-                    val_sem, val_form, val_y = batch_data
-                    val_sem, val_form, val_y = val_sem.to(device), val_form.to(device), val_y.to(device)
-                    val_outputs = model(val_sem, val_form)
-                    v_loss = criterion(val_outputs, val_y)
-                elif is_divergence_model:
-                    val_x, val_y, val_cs = batch_data
-                    val_x, val_y, val_cs = val_x.to(device), val_y.to(device), val_cs.to(device)
-                    val_outputs = model(val_x, val_cs)
-                    v_loss = criterion(val_outputs, val_y)
-                else:
-                    val_x, val_y = batch_data
-                    val_x, val_y = val_x.to(device), val_y.to(device)
-                    val_outputs = model(val_x)
-                    v_loss = criterion(val_outputs, val_y)
+            for batch_x, batch_y in val_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                val_outputs = model(batch_x)
+                v_loss = criterion(val_outputs, batch_y)
                 total_val_loss += v_loss.item()
                 val_preds.extend(torch.argmax(val_outputs, dim=1).cpu().numpy())
-                val_labels_list.extend(val_y.cpu().numpy())
+                val_labels_list.extend(batch_y.cpu().numpy())
 
         avg_val_loss = total_val_loss / len(val_loader)
         val_f1 = f1_score(val_labels_list, val_preds, average='macro')
@@ -517,30 +318,13 @@ def train(config, train_dataset, val_dataset, test_dataset,
         test_preds, test_labels_list = [], []
         total_test_loss = 0.0
         with torch.no_grad():
-            for batch_data in test_loader:
-                if is_form_model:
-                    t_sem, t_form, t_y = batch_data
-                    t_sem, t_form = t_sem.to(device), t_form.to(device)
-                    t_outputs = model(t_sem, t_form)
-                    t_loss = criterion(t_outputs, t_y.to(device))
-                elif is_divergence_model:
-                    tx, ty, tcs = batch_data
-                    tx, tcs = tx.to(device), tcs.to(device)
-                    t_outputs = model(tx, tcs)
-                    t_loss = criterion(t_outputs, ty.to(device))
-                else:
-                    tx, ty = batch_data
-                    tx = tx.to(device)
-                    t_outputs = model(tx)
-                    t_loss = criterion(t_outputs, ty.to(device))
+            for batch_x, batch_y in test_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                t_outputs = model(batch_x)
+                t_loss = criterion(t_outputs, batch_y)
                 total_test_loss += t_loss.item()
                 test_preds.extend(torch.argmax(t_outputs, dim=1).cpu().numpy())
-                if is_form_model:
-                    test_labels_list.extend(t_y.numpy())
-                elif is_divergence_model:
-                    test_labels_list.extend(ty.numpy())
-                else:
-                    test_labels_list.extend(ty.numpy())
+                test_labels_list.extend(batch_y.cpu().numpy())
 
         avg_test_loss = total_test_loss / len(test_loader)
         test_f1 = f1_score(test_labels_list, test_preds, average='macro')
@@ -612,93 +396,28 @@ def evaluate(config, timestamp):
 
     # 从保存的配置中获取模型类型（兼容旧实验）
     model_type = getattr(saved_config, 'model_type', 'mlp')
-    is_form_model = model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp')
 
     # 加载测试数据
-    test_x, test_y, concept_types_from_file, test_concept_scores = load_data(saved_config, "test")
+    test_x, test_y, concept_types_from_file = load_data(saved_config, "test")
     # 优先使用保存的concept_types（保证与训练时一致），回退到文件中的
     concept_types = getattr(saved_config, 'concept_types', None) or concept_types_from_file
 
-    is_divergence_model = model_type == 'divergence_aware_gated_mlp'
-
-    # 构建DataLoader和模型
-    if is_form_model:
-        _, test_form_x, _ = load_dual_data(saved_config, "test")
-        test_loader = DataLoader(
-            TensorDataset(test_x, test_form_x, test_y),
-            batch_size=saved_config.batch_size, shuffle=False
-        )
-    elif is_divergence_model and test_concept_scores is not None:
-        test_loader = DataLoader(
-            TensorDataset(test_x, test_y, test_concept_scores),
-            batch_size=saved_config.batch_size, shuffle=False
-        )
-    else:
-        test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=int(saved_config.batch_size), shuffle=False)
+    test_loader = DataLoader(TensorDataset(test_x, test_y), batch_size=int(saved_config.batch_size), shuffle=False)
 
     # 从概念向量文件中加载原始文本内容（逐条保存预测结果）
     with open(saved_config.test_concept_path, "r", encoding="utf-8") as f:
         raw_concept_data = json.load(f)
 
-    # 兼容两种格式：typed(嵌套) / legacy(扁平)
-    if isinstance(raw_concept_data, dict) and 'data' in raw_concept_data:
-        raw_items = raw_concept_data['data']
-        concept_vectors = [item["concept_scores"] for item in raw_items]
-    else:
-        raw_items = raw_concept_data
-        concept_vectors = [item["concept"] for item in raw_items]
+    # typed格式：data 为样本列表
+    raw_items = raw_concept_data['data']
+    concept_vectors = [item["concept_scores"] for item in raw_items]
     contents = [item["content"] for item in raw_items]
 
-    # 加载概念维度命名（用于结果可解释性）
-    import csv
-    adjective_names = []
-    adjective_chinese = []
-    with open(saved_config.adjective_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        for row in reader:
-            adjective_names.append(row[0])
-            adjective_chinese.append(row[1] if len(row) > 1 else row[0])
-
     # 加载最佳模型
-    if model_type == 'hierarchical_type_gated_mlp':
-        model = HierarchicalTypeGatedMLP(
-            in_features=test_x.shape[1],
-            concept_types=concept_types,
-            dropout_rate=saved_config.dropout_rate,
-            hidden_features=saved_config.hidden_features,
-        )
-    elif model_type == 'type_augmented_gated_mlp':
+    if model_type == 'type_augmented_gated_mlp':
         model = TypeAugmentedGatedMLP(
             in_features=test_x.shape[1],
             concept_types=concept_types,
-            dropout_rate=saved_config.dropout_rate,
-            hidden_features=saved_config.hidden_features,
-        )
-    elif model_type == 'divergence_aware_gated_mlp':
-        model = DivergenceAwareGatedMLP(
-            in_features=test_x.shape[1],
-            concept_types=concept_types,
-            dropout_rate=saved_config.dropout_rate,
-            hidden_features=saved_config.hidden_features,
-        )
-    elif model_type == 'form_conditioned_mlp':
-        model = FormConditionedMLP(
-            in_features=test_x.shape[1],
-            form_dim=getattr(saved_config, 'form_dim', 10),
-            dropout_rate=saved_config.dropout_rate,
-            hidden_features=saved_config.hidden_features,
-        )
-    elif model_type == 'form_conditioned_simple_mlp':
-        model = FormConditionedSimpleMLP(
-            in_features=test_x.shape[1],
-            form_dim=getattr(saved_config, 'form_dim', 10),
-            dropout_rate=saved_config.dropout_rate,
-            hidden_features=saved_config.hidden_features,
-        )
-    elif model_type == 'simple_mlp':
-        model = SimpleMLP(
-            in_features=test_x.shape[1],
             dropout_rate=saved_config.dropout_rate,
             hidden_features=saved_config.hidden_features,
         )
@@ -714,17 +433,13 @@ def evaluate(config, timestamp):
     # 推理
     all_preds, all_labels, all_probs = [], [], []
     with torch.no_grad():
-        for batch_data in test_loader:
-            if is_form_model:
-                batch_sem, batch_form, batch_y = batch_data
-                outputs = model(batch_sem.to(device), batch_form.to(device))
-            else:
-                batch_x, batch_y = batch_data
-                outputs = model(batch_x.to(device))
+        for batch_x, batch_y in test_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            outputs = model(batch_x)
             probs = torch.softmax(outputs, dim=1)
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(batch_y.numpy())
+            all_labels.extend(batch_y.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
 
     # 计算指标
@@ -807,30 +522,65 @@ def main():
         experiment_dir.mkdir(parents=True, exist_ok=True)
         config.experiment_path = experiment_dir
 
-        # 是否需要form特征
-        is_form_model = config.model_type in ('form_conditioned_mlp', 'form_conditioned_simple_mlp')
+        # 是否启用确定性模式（须在加载数据前设置，保证可复现）
+        if config.use_deterministic:
+            from utils.seed import set_reproducibility
+            set_reproducibility(config)
+            print(">>> 已启用确定性模式 (Reproducibility Enabled)")
+        else:
+            print(">>> 已禁用确定性模式 (Randomness Enabled), 结果将不可复现")
 
-        # concept_types仅在非form模型时从load_data获取
-        concept_types = None
+        # 加载数据
+        train_x, train_y, concept_types = load_data(config, "train")
+        test_x, test_y, _ = load_data(config, "test")
 
-        # 保存完整配置到config.json
+        # 从训练集中按9:1比例划分验证集（分层抽样）
+        train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
+            train_x.numpy(), train_y.numpy(),
+            test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
+        )
+        train_dataset = TensorDataset(
+            torch.tensor(train_x_np, dtype=torch.float32),
+            torch.tensor(train_y_np, dtype=torch.long)
+        )
+        val_dataset = TensorDataset(
+            torch.tensor(val_x_np, dtype=torch.float32),
+            torch.tensor(val_y_np, dtype=torch.long)
+        )
+        test_dataset = TensorDataset(test_x, test_y)
+
+        print(f">>> 训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
+
+        # 保存完整配置到config.json（概念类型、特征维度、数据规模需在加载数据后一次性写入）
         config_dict = {
             # 实验元信息
             "timestamp": timestamp,
             "experiment_path": str(config.experiment_path),
-            "concept_type": getattr(args, 'concept_type', 'likert'),
-            "concept_format": getattr(args, 'concept_format', 'legacy'),
-            "concept_feat_mode": config.concept_feat_mode,
-            "concept_suffix": getattr(args, 'concept_suffix', None),
-            "model_type": config.model_type,
-
-            # 数据与词典
             "dataset_name": config.dataset_name,
             "model_name": config.model_name,
+
+            # 概念向量与特征
+            "concept_format": "typed",
+            "concept_feat_mode": config.concept_feat_mode,
             "adjective_path": str(config.adjective_path),
+            "num_concepts": len(concept_types),
+            "concept_dim": int(train_x.shape[1]),
             "train_concept_path": str(config.train_concept_path),
             "test_concept_path": str(config.test_concept_path),
-            "concept_dim": config.train_concept_path.stem,
+
+            # 数据规模
+            "train_size": len(train_dataset),
+            "val_size": len(val_dataset),
+            "test_size": len(test_x),
+            "train_val_split": 0.9,
+
+            # 任务
+            "num_classes": 2,
+
+            # 模型
+            "model_type": config.model_type,
+            "hidden_features": config.hidden_features,
+            "dropout_rate": config.dropout_rate,
 
             # 随机种子
             "seed": config.seed,
@@ -844,98 +594,18 @@ def main():
             "div_factor": config.div_factor,
             "final_div_factor": config.final_div_factor,
             "anneal_strategy": config.anneal_strategy,
-
-            # 模型结构
-            "dropout_rate": config.dropout_rate,
-            "hidden_features": config.hidden_features,
             "patience": config.patience,
-            "form_dim": config.form_dim,
-            "concept_types": concept_types,
+            "loss": "CrossEntropyLoss",
+            "optimizer": "AdamW",
+            "scheduler": "OneCycleLR",
         }
-
-        # Form-Conditioned额外路径
-        if is_form_model:
-            config_dict["train_form_concept_path"] = str(config.train_form_concept_path)
-            config_dict["test_form_concept_path"] = str(config.test_form_concept_path)
         with open(experiment_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_dict, f, indent=2, ensure_ascii=False)
         print(f">>> 配置文件已保存至: {experiment_dir / 'config.json'}\n")
 
-        # 是否启用确定性模式
-        if config.use_deterministic:
-            from utils.seed import set_reproducibility
-            set_reproducibility(config)
-            print(">>> 已启用确定性模式 (Reproducibility Enabled)")
-        else:
-            print(">>> 已禁用确定性模式 (Randomness Enabled), 结果将不可复现")
-
-        # 加载数据
-        if is_form_model:
-            train_sem, train_form, train_y = load_dual_data(config, "train")
-            test_sem, test_form, test_y = load_dual_data(config, "test")
-
-            # 用索引切分确保sem和form使用相同train/val划分
-            indices = np.arange(len(train_sem))
-            train_idx, val_idx = train_test_split(
-                indices, test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
-            )
-
-            train_dataset = TensorDataset(train_sem[train_idx], train_y[train_idx])
-            val_dataset = TensorDataset(train_sem[val_idx], train_y[val_idx])
-            test_dataset = TensorDataset(test_sem, test_y)
-
-            form_datasets = {
-                "train": train_form[train_idx],
-                "val": train_form[val_idx],
-                "test": test_form,
-            }
-        else:
-            train_x, train_y, concept_types, train_concept_scores = load_data(config, "train")
-            test_x, test_y, _, test_concept_scores = load_data(config, "test")
-
-            # 从训练集中按9:1比例划分验证集（分层抽样）
-            is_divergence_model = config.model_type == 'divergence_aware_gated_mlp'
-
-            if is_divergence_model and train_concept_scores is not None:
-                # 分歧感知模型：concept_scores也需要同步划分
-                train_x_np, val_x_np, train_y_np, val_y_np, train_cs_np, val_cs_np = train_test_split(
-                    train_x.numpy(), train_y.numpy(), train_concept_scores.numpy(),
-                    test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
-                )
-                train_dataset = TensorDataset(
-                    torch.tensor(train_x_np, dtype=torch.float32),
-                    torch.tensor(train_y_np, dtype=torch.long),
-                    torch.tensor(train_cs_np, dtype=torch.float32),
-                )
-                val_dataset = TensorDataset(
-                    torch.tensor(val_x_np, dtype=torch.float32),
-                    torch.tensor(val_y_np, dtype=torch.long),
-                    torch.tensor(val_cs_np, dtype=torch.float32),
-                )
-                test_dataset = TensorDataset(test_x, test_y, test_concept_scores)
-            else:
-                # 标准模型：不需要concept_scores
-                train_x_np, val_x_np, train_y_np, val_y_np = train_test_split(
-                    train_x.numpy(), train_y.numpy(),
-                    test_size=0.1, stratify=train_y.numpy(), random_state=config.seed
-                )
-                train_dataset = TensorDataset(
-                    torch.tensor(train_x_np, dtype=torch.float32),
-                    torch.tensor(train_y_np, dtype=torch.long)
-                )
-                val_dataset = TensorDataset(
-                    torch.tensor(val_x_np, dtype=torch.float32),
-                    torch.tensor(val_y_np, dtype=torch.long)
-                )
-                test_dataset = TensorDataset(test_x, test_y)
-            form_datasets = None
-
-        print(f">>> 训练集: {len(train_dataset)}, 验证集: {len(val_dataset)}, 测试集: {len(test_dataset)}")
-
         # 训练并获取指标
         metrics = train(config, train_dataset, val_dataset, test_dataset,
-                        model_type=config.model_type, form_datasets=form_datasets,
-                        concept_types=concept_types)
+                        model_type=config.model_type, concept_types=concept_types)
 
         # 绘制训练曲线图
         plot_metrics(config, *metrics)
